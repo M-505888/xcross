@@ -1,3 +1,10 @@
+## 1.4.1
+
+- Vendor transitive SwiftPM dependencies faithfully: keep `.package(path:)` unnamed for manifests older than swift-tools-version 5.2, and initialize git submodules in vendored checkouts (fixes `flutter_image_compress`).
+- Preserve chained-fixup metadata when repairing Objective-C selrefs, fixing a launch crash in `dyld4::PrebuiltObjC` on apps linked with lld 19 or newer.
+- Install lld 19+ in the apt setup script and verify the linker in the dnf and pacman ones.
+- Report the resolved linker version in `xcross doctor`.
+
 ## 1.4.0
 
 - Add `xcross config` with an interactive terminal config editor and a dynamic, script-driven setup flow.
