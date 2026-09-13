@@ -12,11 +12,21 @@ import 'package:pure/pure.dart';
 /// Captured result of a finished subprocess.
 @immutable
 final class CapturedProcess {
-  const CapturedProcess(this.exitCode, this.stdout, this.stderr);
+  const CapturedProcess(
+    this.exitCode,
+    this.stdout,
+    this.stderr, {
+    this.timedOut = false,
+  });
 
   final int exitCode;
   final String stdout;
   final String stderr;
+
+  /// Whether the process was killed for exceeding its timeout rather than
+  /// exiting on its own. [exitCode] is then whatever the kill produced and
+  /// says nothing about the work.
+  final bool timedOut;
 }
 
 /// Process lookup and child-environment overlay supplied by an embedding app.
@@ -135,12 +145,28 @@ abstract final class ProcessRunner {
   );
 
   /// Runs [executable] to completion, capturing stdout/stderr as UTF-8.
+  ///
+  /// With [timeout], the child and everything it spawned are killed once it
+  /// elapses and [CapturedProcess.timedOut] is set, so a caller can report a
+  /// stuck tool instead of waiting on it forever. Use it for any child that
+  /// might block on something no one can answer, such as a credential
+  /// prompt on a pipe nobody reads.
   static Future<CapturedProcess> run(
     String executable,
     List<String> arguments, {
     String? workingDirectory,
     Map<String, String>? environment,
+    Duration? timeout,
   }) async {
+    if (timeout != null) {
+      return _runWithTimeout(
+        executable,
+        arguments,
+        workingDirectory: workingDirectory,
+        environment: environment,
+        timeout: timeout,
+      );
+    }
     final result = await Process.run(
       _resolvedExecutable(executable),
       arguments,
@@ -157,6 +183,59 @@ abstract final class ProcessRunner {
     );
   }
 
+  /// Runs [executable], killing the whole process tree if [timeout] elapses.
+  ///
+  /// Killing the tree, not just the child, is what makes this reliable: git
+  /// blocks inside a credential helper it spawned, and reaping only git
+  /// leaves that helper holding the pipes.
+  static Future<CapturedProcess> _runWithTimeout(
+    String executable,
+    List<String> arguments, {
+    required Duration timeout,
+    String? workingDirectory,
+    Map<String, String>? environment,
+  }) async {
+    final process = await start(
+      executable,
+      arguments,
+      workingDirectory: workingDirectory,
+      environment: environment,
+    );
+    final out = StringBuffer();
+    final err = StringBuffer();
+    final drained = Future.wait([
+      process.stdout
+          .transform(const Utf8Decoder(allowMalformed: true))
+          .forEach(out.write),
+      process.stderr
+          .transform(const Utf8Decoder(allowMalformed: true))
+          .forEach(err.write),
+    ]);
+    // Nothing is going to be typed at this child. Closing its stdin turns a
+    // read that would block forever into an immediate EOF.
+    try {
+      await process.stdin.close();
+    } on Object catch (_) {}
+
+    var timedOut = false;
+    final timer = Timer(timeout, () {
+      timedOut = true;
+      unawaited(killTree(process));
+    });
+    try {
+      final code = await process.exitCode;
+      await drained.catchError((Object _) => <void>[]);
+      return CapturedProcess(
+        code,
+        out.toString(),
+        err.toString(),
+        timedOut: timedOut,
+      );
+    } finally {
+      timer.cancel();
+    }
+  }
+
   /// Runs [executable], throwing [CliError] on a non-zero exit code.
   ///
   /// With [tail], output streams into that step's tail and stdin is forwarded
@@ -171,6 +250,7 @@ abstract final class ProcessRunner {
     String? label,
     Step? tail,
     bool forwardStdin = true,
+    Duration? timeout,
   }) {
     Log.logTrace(
       '[${label ?? executable}] running: '
@@ -200,6 +280,7 @@ abstract final class ProcessRunner {
       arguments,
       workingDirectory: workingDirectory,
       environment: environment,
+      timeout: timeout,
     );
   }
 
@@ -259,14 +340,22 @@ abstract final class ProcessRunner {
     List<String> arguments, {
     String? workingDirectory,
     Map<String, String>? environment,
+    Duration? timeout,
   }) async {
     final result = await run(
       executable,
       arguments,
       workingDirectory: workingDirectory,
       environment: environment,
+      timeout: timeout,
     );
     if (result.exitCode == 0) return;
+    if (result.timedOut) {
+      throw CliError(
+        'command timed out after ${timeout!.inSeconds}s and was killed: '
+        '${commandLine(executable, arguments)}',
+      );
+    }
     final output = [
       result.stdout,
       result.stderr,

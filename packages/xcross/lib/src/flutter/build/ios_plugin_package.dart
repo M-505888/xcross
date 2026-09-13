@@ -1357,15 +1357,84 @@ abstract final class GeneratedPluginsPackage {
     }
   }
 
-  /// Process-local settings for Windows SwiftPM dependency checkout and
-  /// sentry-cocoa's source-build manifest lane.
+  /// Environment that makes Git — and anything spawning it, including
+  /// SwiftPM's own dependency resolution — fail instead of waiting on a
+  /// human.
+  ///
+  /// Nothing is attached to this build's stdin: our runners pipe it and
+  /// SwiftPM pipes its children too. So when a vendored dependency's
+  /// repository has moved, gone private, or started rate-limiting, Git's
+  /// default answer — prompt for credentials — is a prompt no one can see
+  /// or answer, and the child waits forever. On Windows, Git Credential
+  /// Manager escalates that to an invisible GUI dialog. That is how a CI
+  /// job sits for hours inside `Building Flutter plugins` printing nothing.
+  ///
+  /// * `GIT_TERMINAL_PROMPT=0` refuses username/password prompts on a tty.
+  /// * Empty `GIT_ASKPASS`/`SSH_ASKPASS` with `SSH_ASKPASS_REQUIRE=never`
+  ///   disables the graphical fallbacks Git uses when there is no tty.
+  /// * `GCM_INTERACTIVE=never` and `GCM_PROVIDER=none` keep Git Credential
+  ///   Manager from opening a window of its own.
+  /// * `GIT_SSH_COMMAND` with `BatchMode=yes` fails an SSH remote outright
+  ///   instead of asking for a passphrase or host-key confirmation.
+  ///
+  /// Each one turns a silent hang into an ordinary clone failure whose
+  /// message names the repository that could not be read.
+  @visibleForTesting
+  static const Map<String, String> nonInteractiveGitEnvironment = {
+    'GIT_TERMINAL_PROMPT': '0',
+    'GIT_ASKPASS': '',
+    'SSH_ASKPASS': '',
+    'SSH_ASKPASS_REQUIRE': 'never',
+    'GCM_INTERACTIVE': 'never',
+    'GCM_PROVIDER': 'none',
+    'GIT_SSH_COMMAND':
+        'ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new',
+  };
+
+  /// Git settings applied through `GIT_CONFIG_*`, in order.
+  ///
+  /// Resetting `credential.helper` closes the last door: a helper
+  /// configured system-wide — Git Credential Manager on the Windows
+  /// runners, `osxkeychain` on a developer's Mac — is consulted before any
+  /// prompt setting applies, and it can block on its own UI. Clearing the
+  /// list leaves Git with nobody to ask.
+  ///
+  /// The value is `""`, not the empty string: Git parses `GIT_CONFIG_VALUE_*`
+  /// the way it parses a config file, and rejects a genuinely empty one with
+  /// "missing config value ... fatal: unable to parse command-line config",
+  /// which would fail every git command this build runs rather than only the
+  /// ones that need credentials. Two quotes are the config-file spelling of
+  /// an empty value, and an empty `credential.helper` is what resets the
+  /// list.
+  ///
+  /// `core.symlinks=false` keeps Windows checkouts on placeholder files
+  /// that [materializeGitCheckoutSymlinks] converts afterwards. Our own
+  /// clones override it per command with `-c core.symlinks=true` where the
+  /// host can create real symlinks; a command-line `-c` outranks these.
+  static List<({String key, String value})> _gitConfigEntries({
+    required bool windows,
+  }) => [
+    (key: 'credential.helper', value: '""'),
+    // Git 2.36+ refuses a helper prompt outright; older Git ignores it and
+    // relies on the reset above.
+    (key: 'credential.interactive', value: 'false'),
+    if (windows) (key: 'core.symlinks', value: 'false'),
+  ];
+
+  /// Process-local settings for SwiftPM dependency checkout: the
+  /// non-interactive Git settings every host needs, plus the Windows
+  /// symlink and sentry-cocoa source-build manifest lane.
   static Map<String, String>? swiftProcessEnvironment({bool? windows}) {
-    if (!(windows ?? Platform.isWindows)) return null;
+    final onWindows = windows ?? Platform.isWindows;
+    final config = _gitConfigEntries(windows: onWindows);
     return {
-      'GIT_CONFIG_COUNT': '1',
-      'GIT_CONFIG_KEY_0': 'core.symlinks',
-      'GIT_CONFIG_VALUE_0': 'false',
-      'EXPERIMENTAL_SPM_BUILDS': '1',
+      ...nonInteractiveGitEnvironment,
+      'GIT_CONFIG_COUNT': '${config.length}',
+      for (final (index, entry) in config.indexed) ...{
+        'GIT_CONFIG_KEY_$index': entry.key,
+        'GIT_CONFIG_VALUE_$index': entry.value,
+      },
+      if (onWindows) 'EXPERIMENTAL_SPM_BUILDS': '1',
     };
   }
 
@@ -4033,12 +4102,33 @@ let package = Package(
     final runResolve =
         resolve ??
         (directory) async {
-          final result = await ProcessRunner.run(swift, [
-            if (!Platform.isWindows) 'package',
-            '--package-path',
-            directory,
-            'resolve',
-          ]);
+          // SwiftPM resolves source-control dependencies by spawning git,
+          // so this needs the same non-interactive settings as our own
+          // clones: otherwise a moved or private dependency parks SwiftPM
+          // on an unanswerable credential prompt.
+          final result = await ProcessRunner.run(
+            swift,
+            [
+              if (!Platform.isWindows) 'package',
+              '--package-path',
+              directory,
+              'resolve',
+            ],
+            environment: swiftProcessEnvironment(),
+            // SwiftPM spawns git per dependency, and a URL-scoped credential
+            // helper is beyond the reach of any environment reset, so bound
+            // the whole resolution too. This covers a graph the size of
+            // firebase-ios-sdk many times over.
+            timeout: const Duration(minutes: 30),
+          );
+          if (result.timedOut) {
+            throw FlutterBuildError(
+              'Resolving SwiftPM dependencies in $directory took longer than '
+              '30 minutes and was stopped. This usually means git is blocked '
+              'on a credential prompt for a private or moved dependency.\n'
+              '${result.stderr.trim()}',
+            );
+          }
           if (result.exitCode != 0) {
             throw FlutterBuildError(
               'Cannot resolve SwiftPM dependencies in $directory:\n'
@@ -5038,6 +5128,15 @@ let package = Package(
   ) async {
     final destDir = Directory(destination);
     final environment = swiftProcessEnvironment(windows: Platform.isWindows);
+    // Last line of defence behind [nonInteractiveGitEnvironment]. That
+    // environment cannot clear a *URL-scoped* helper — `credential
+    // .https://github.com.helper` is a different key per host, so no fixed
+    // reset covers them — and a helper that opens UI still blocks on a
+    // build that has no one watching. A network stall does the same.
+    // Generous enough that a cold clone of a large dependency finishes
+    // (firebase-ios-sdk takes well under a minute on CI), short enough
+    // that a stuck one is reported the same hour.
+    const timeout = Duration(minutes: 10);
     // `core.symlinks=true` on every command, not just the clone: a later
     // `reset --hard` under the default `false` would see the real symlinks
     // as modified files and overwrite them with placeholders again.
@@ -5070,6 +5169,7 @@ let package = Package(
           '1',
         ],
         environment: environment,
+        timeout: timeout,
         label: 'git submodule update ${p.basename(destination)}',
       );
     }
@@ -5083,13 +5183,14 @@ let package = Package(
         'rev-parse',
         '--verify',
         'HEAD',
-      ], environment: environment);
+      ], environment: environment, timeout: timeout);
       if (head.exitCode == 0 &&
           head.stdout.trim().toLowerCase() == ref.toLowerCase()) {
         await ProcessRunner.runChecked(
           git,
           [...gitConfig, '-C', destination, 'reset', '--hard', 'HEAD'],
           environment: environment,
+          timeout: timeout,
           label: 'git reset vendored package',
         );
         await updateSubmodules();
@@ -5108,7 +5209,7 @@ let package = Package(
       ref,
       url,
       destination,
-    ], environment: environment);
+    ], environment: environment, timeout: timeout);
     if (shallow.exitCode == 0) {
       await updateSubmodules();
       return;
@@ -5121,7 +5222,7 @@ let package = Package(
       '-C',
       destination,
       'init',
-    ], environment: environment);
+    ], environment: environment, timeout: timeout);
     final fetch = init.exitCode == 0
         ? await ProcessRunner.run(git, [
             ...gitConfig,
@@ -5132,7 +5233,7 @@ let package = Package(
             '1',
             url,
             ref,
-          ], environment: environment)
+          ], environment: environment, timeout: timeout)
         : init;
     final checkout = fetch.exitCode == 0
         ? await ProcessRunner.run(git, [
@@ -5142,7 +5243,7 @@ let package = Package(
             'checkout',
             '--detach',
             'FETCH_HEAD',
-          ], environment: environment)
+          ], environment: environment, timeout: timeout)
         : fetch;
     if (checkout.exitCode == 0) {
       await updateSubmodules();
@@ -5154,12 +5255,14 @@ let package = Package(
       git,
       [...gitConfig, 'clone', url, destination],
       environment: environment,
+      timeout: timeout,
       label: 'git clone $url',
     );
     await ProcessRunner.runChecked(
       git,
       [...gitConfig, '-C', destination, 'checkout', ref],
       environment: environment,
+      timeout: timeout,
       label: 'git checkout $ref',
     );
     await updateSubmodules();

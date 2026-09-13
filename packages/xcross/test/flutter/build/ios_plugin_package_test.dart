@@ -4123,11 +4123,75 @@ module FirebaseFirestore {
         ],
       );
       expect(GeneratedPluginsPackage.swiftProcessEnvironment(windows: true), {
-        'GIT_CONFIG_COUNT': '1',
-        'GIT_CONFIG_KEY_0': 'core.symlinks',
-        'GIT_CONFIG_VALUE_0': 'false',
+        ...GeneratedPluginsPackage.nonInteractiveGitEnvironment,
+        'GIT_CONFIG_COUNT': '3',
+        'GIT_CONFIG_KEY_0': 'credential.helper',
+        // Two quotes, not the empty string: git rejects a genuinely empty
+        // GIT_CONFIG_VALUE_* and would then fail every command.
+        'GIT_CONFIG_VALUE_0': '""',
+        'GIT_CONFIG_KEY_1': 'credential.interactive',
+        'GIT_CONFIG_VALUE_1': 'false',
+        'GIT_CONFIG_KEY_2': 'core.symlinks',
+        'GIT_CONFIG_VALUE_2': 'false',
         'EXPERIMENTAL_SPM_BUILDS': '1',
       });
+    });
+
+    test('refuses interactive git credential prompts on every host', () {
+      // A prompt no one can answer is how a CI build hangs for hours
+      // instead of failing on the dependency it could not read.
+      for (final windows in [true, false]) {
+        final environment = GeneratedPluginsPackage.swiftProcessEnvironment(
+          windows: windows,
+        );
+        expect(environment, isNotNull);
+        expect(environment!['GIT_TERMINAL_PROMPT'], '0');
+        expect(environment['GIT_ASKPASS'], '');
+        expect(environment['SSH_ASKPASS'], '');
+        expect(environment['SSH_ASKPASS_REQUIRE'], 'never');
+        expect(environment['GCM_INTERACTIVE'], 'never');
+        expect(environment['GCM_PROVIDER'], 'none');
+        expect(environment['GIT_SSH_COMMAND'], contains('BatchMode=yes'));
+      }
+    });
+
+    test('keeps Windows-only SwiftPM settings off other hosts', () {
+      final posix = GeneratedPluginsPackage.swiftProcessEnvironment(
+        windows: false,
+      )!;
+      expect(posix.containsKey('EXPERIMENTAL_SPM_BUILDS'), isFalse);
+      // Only the credential settings, never the Windows symlink lane.
+      expect(posix['GIT_CONFIG_COUNT'], '2');
+      expect(posix['GIT_CONFIG_KEY_0'], 'credential.helper');
+      expect(posix['GIT_CONFIG_VALUE_0'], '""');
+      expect(posix['GIT_CONFIG_KEY_1'], 'credential.interactive');
+      expect(posix.containsKey('GIT_CONFIG_KEY_2'), isFalse);
+    });
+
+    test('disables every configured git credential helper', () {
+      // A system-wide helper (Git Credential Manager on the Windows
+      // runners) is consulted before GIT_TERMINAL_PROMPT applies and can
+      // block on UI of its own, so the helper list has to be reset too.
+      for (final windows in [true, false]) {
+        final environment = GeneratedPluginsPackage.swiftProcessEnvironment(
+          windows: windows,
+        )!;
+        final count = int.parse(environment['GIT_CONFIG_COUNT']!);
+        final settings = {
+          for (var index = 0; index < count; index++)
+            environment['GIT_CONFIG_KEY_$index']!:
+                environment['GIT_CONFIG_VALUE_$index']!,
+        };
+        // `""` is the config-file spelling of an empty value, which is what
+        // resets an inherited helper list.
+        expect(settings['credential.helper'], '""');
+        expect(settings['credential.interactive'], 'false');
+        // Every declared key must have a value: git refuses to parse an
+        // empty one and would fail every command this build runs.
+        for (var index = 0; index < count; index++) {
+          expect(environment['GIT_CONFIG_VALUE_$index'], isNotEmpty);
+        }
+      }
     });
   });
 
