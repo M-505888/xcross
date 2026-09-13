@@ -11,7 +11,7 @@ else
 fi
 
 packages="
-clang lld llvm
+clang llvm
 python3 python3-pip python3-venv pipx
 usbmuxd usbutils libimobiledevice-utils
 pkg-config zlib1g-dev libpython3-dev gcc g++ curl
@@ -26,16 +26,11 @@ $SUDO apt-get install -y $packages
 
 # Up to and including LLVM 18, ld64.lld miswires `_objc_msgSend$<selector>`
 # stubs, which breaks Objective-C plugins at runtime. Ubuntu 24.04 still
-# ships 18 as the unversioned `lld`, so install the newest versioned
-# `lld-<N>` at or above 19 and point a stable name at its ld64.lld.
+# ships 18 as the unversioned `lld`, and older releases have nothing newer in
+# their archive at all. Install lld from apt.llvm.org instead, which always
+# carries a current versioned `lld-<N>`, then point stable names at its
+# linkers.
 min_lld=19
-newest=""
-for candidate in $(apt-cache pkgnames lld- 2>/dev/null | sed -n 's/^lld-\([0-9][0-9]*\)$/\1/p' | sort -rn); do
-	if [ "$candidate" -ge "$min_lld" ]; then
-		newest="$candidate"
-		break
-	fi
-done
 
 have_fixed_lld() {
 	for bin in /usr/bin/ld64.lld-*; do
@@ -49,12 +44,32 @@ have_fixed_lld() {
 	return 1
 }
 
-if ! have_fixed_lld && [ -n "$newest" ]; then
-	$SUDO apt-get install -y "lld-$newest" || true
+if ! have_fixed_lld; then
+	# llvm.sh adds the apt.llvm.org repository for this distro and installs the
+	# named component; with no version argument it picks the current stable one.
+	llvm_dir="$(mktemp -d)"
+	if curl -fsSL https://apt.llvm.org/llvm.sh -o "$llvm_dir/llvm.sh"; then
+		chmod +x "$llvm_dir/llvm.sh"
+		# No version argument: llvm.sh picks the current stable release and
+		# installs clang/lld/lldb for it.
+		$SUDO "$llvm_dir/llvm.sh" || true
+	else
+		printf 'warning: could not download https://apt.llvm.org/llvm.sh\n' >&2
+	fi
+	rm -rf "$llvm_dir"
+	if ! have_fixed_lld; then
+		# Last resort: whatever versioned lld this host's own archive offers.
+		for candidate in $(apt-cache pkgnames lld- 2>/dev/null | sed -n 's/^lld-\([0-9][0-9]*\)$/\1/p' | sort -rn); do
+			if [ "$candidate" -ge "$min_lld" ]; then
+				$SUDO apt-get install -y "lld-$candidate" || true
+				break
+			fi
+		done
+	fi
 fi
 
-# Put the newest fixed ld64.lld on PATH under its unversioned name, unless
-# something xcross does not manage already owns that path.
+# Put the newest fixed lld on PATH under its unversioned names, unless
+# something xcross does not manage already owns those paths.
 best_version=0
 best=""
 for bin in /usr/bin/ld64.lld-*; do
@@ -85,6 +100,14 @@ if [ -n "$best" ]; then
 		printf 'ld64.lld: %s -> %s\n' "$stable" "$best"
 	else
 		printf 'warning: %s is not managed by xcross; leaving it alone (wanted %s)\n' "$stable" "$best" >&2
+	fi
+
+	# apt.llvm.org only installs versioned names, so the ELF driver (`ld.lld`,
+	# used by `clang -fuse-ld=lld`) needs an unversioned entry point too.
+	if [ -x "/usr/bin/ld.lld-$best_version" ] && command -v update-alternatives >/dev/null 2>&1; then
+		$SUDO update-alternatives --install /usr/bin/ld.lld ld.lld \
+			"/usr/bin/ld.lld-$best_version" "$best_version" || true
+		printf 'ld.lld: /usr/bin/ld.lld -> /usr/bin/ld.lld-%s\n' "$best_version"
 	fi
 fi
 
