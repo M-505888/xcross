@@ -304,7 +304,8 @@ final class DarwinSdk {
       ? 'Install the LLVM one — `brew install lld && brew install llvm`, or `xcross setup` — '
             'and make sure it is on PATH.'
       : 'Install the LLVM one — `xcross setup`, or '
-            '`sudo apt install lld-$firstLd64LldWithCorrectSelectorStubs` '
+            '`curl -fsSL https://apt.llvm.org/llvm.sh | sudo bash` for lld '
+            '$firstLd64LldWithCorrectSelectorStubs or newer '
             '(the unversioned `lld` is still 18 on Ubuntu 24.04, which '
             'miswires Objective-C selector stubs) — and make sure its '
             'ld64.lld is on PATH.';

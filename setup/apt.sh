@@ -17,6 +17,7 @@ usbmuxd usbutils libimobiledevice-utils
 pkg-config zlib1g-dev libpython3-dev gcc g++ curl
 libxml2-dev libncurses-dev libz3-dev gnupg2
 libc6-dev libcurl4-openssl-dev
+lsb-release wget software-properties-common ca-certificates
 "
 
 $SUDO apt-get update
@@ -49,10 +50,10 @@ if ! have_fixed_lld; then
 	# named component; with no version argument it picks the current stable one.
 	llvm_dir="$(mktemp -d)"
 	if curl -fsSL https://apt.llvm.org/llvm.sh -o "$llvm_dir/llvm.sh"; then
-		chmod +x "$llvm_dir/llvm.sh"
-		# No version argument: llvm.sh picks the current stable release and
-		# installs clang/lld/lldb for it.
-		$SUDO "$llvm_dir/llvm.sh" || true
+		# `bash <file>`, not `./llvm.sh`: the script is bash-only, and a
+		# noexec /tmp would otherwise fail it. No version argument, so it
+		# installs the current stable clang/lld/lldb for this distro.
+		$SUDO bash "$llvm_dir/llvm.sh" || true
 	else
 		printf 'warning: could not download https://apt.llvm.org/llvm.sh\n' >&2
 	fi
