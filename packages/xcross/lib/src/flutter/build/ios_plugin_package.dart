@@ -2998,6 +2998,32 @@ let package = Package(
     return '$identity@$safeRef';
   }
 
+  /// Swift tools version declared by [manifest], or `null` when absent.
+  ///
+  /// `.package(name:path:)` only exists from PackageDescription 5.2, so a
+  /// vendored manifest older than that (SDWebImageWebPCoder pins 5.0) must
+  /// get a plain `.package(path:)`. Pre-5.2 SwiftPM derives the dependency
+  /// name from the dependency's own `Package(name:)`, so target references
+  /// keep resolving without an explicit `name:`.
+  @visibleForTesting
+  static ({int major, int minor})? manifestToolsVersion(String manifest) {
+    final match = RegExp(
+      r'^//\s*swift-tools-version\s*:?\s*(\d+)(?:\.(\d+))?',
+      multiLine: true,
+    ).firstMatch(manifest);
+    if (match == null) return null;
+    return (
+      major: int.parse(match.group(1)!),
+      minor: int.tryParse(match.group(2) ?? '0') ?? 0,
+    );
+  }
+
+  static bool _supportsNamedPathDeps(String manifest) {
+    final version = manifestToolsVersion(manifest);
+    if (version == null) return true;
+    return version.major > 5 || (version.major == 5 && version.minor >= 2);
+  }
+
   /// SwiftPM package identity implied by a git URL (last path segment, no
   /// `.git`). Used as `.package(name:)` so target `package:` references keep
   /// matching after we vendor into a `name@version` directory.
@@ -4249,6 +4275,7 @@ let package = Package(
     if (deps.isEmpty) return manifest;
 
     var result = manifest;
+    final namedPathDeps = _supportsNamedPathDeps(manifest);
     for (final dep in deps) {
       final ref = evaluatedRefs[_canonicalGitUrl(dep.url)];
       if (ref == null) {
@@ -4327,9 +4354,10 @@ let package = Package(
           });
         }
       }
-      final pathDep =
-          '.package(name: "$identity", '
-          'path: "${_swiftPath(destination)}")';
+      final pathDep = namedPathDeps
+          ? '.package(name: "$identity", '
+                'path: "${_swiftPath(destination)}")'
+          : '.package(path: "${_swiftPath(destination)}")';
       result = result.replaceFirst(dep.match, pathDep);
     }
     return result;
@@ -5023,6 +5051,29 @@ let package = Package(
             ],
           ]
         : const <String>[];
+    // Some packages keep their sources in a submodule (libwebp-Xcode vendors
+    // webmproject/libwebp), so a submodule-less checkout compiles into
+    // "unknown type name WebPDemuxer" once a dependent target imports it.
+    Future<void> updateSubmodules() async {
+      if (!File(p.join(destination, '.gitmodules')).existsSync()) return;
+      await ProcessRunner.runChecked(
+        git,
+        [
+          ...gitConfig,
+          '-C',
+          destination,
+          'submodule',
+          'update',
+          '--init',
+          '--recursive',
+          '--depth',
+          '1',
+        ],
+        environment: environment,
+        label: 'git submodule update ${p.basename(destination)}',
+      );
+    }
+
     if (File(p.join(destination, '.git')).existsSync() ||
         Directory(p.join(destination, '.git')).existsSync()) {
       final head = await ProcessRunner.run(git, [
@@ -5041,6 +5092,7 @@ let package = Package(
           environment: environment,
           label: 'git reset vendored package',
         );
+        await updateSubmodules();
         return;
       }
     }
@@ -5057,7 +5109,10 @@ let package = Package(
       url,
       destination,
     ], environment: environment);
-    if (shallow.exitCode == 0) return;
+    if (shallow.exitCode == 0) {
+      await updateSubmodules();
+      return;
+    }
 
     await _deleteEntity(destination);
     await Directory(destination).create(recursive: true);
@@ -5089,7 +5144,10 @@ let package = Package(
             'FETCH_HEAD',
           ], environment: environment)
         : fetch;
-    if (checkout.exitCode == 0) return;
+    if (checkout.exitCode == 0) {
+      await updateSubmodules();
+      return;
+    }
 
     await _deleteEntity(destination);
     await ProcessRunner.runChecked(
@@ -5104,6 +5162,7 @@ let package = Package(
       environment: environment,
       label: 'git checkout $ref',
     );
+    await updateSubmodules();
   }
 
   static Future<bool> _normalizeVendoredPackageManifests(

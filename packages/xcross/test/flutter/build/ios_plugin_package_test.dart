@@ -1001,6 +1001,75 @@ let package = Package(
       expect(clones.length, 2);
     });
 
+    test(
+      'omits name: when a vendored manifest predates tools-version 5.2',
+      () async {
+        // `.package(name:path:)` only exists from PackageDescription 5.2, so
+        // emitting it into SDWebImageWebPCoder's 5.0 manifest fails with
+        // "'package(name:path:)' is unavailable" (arxdeus/xcross#66).
+        final vendorDir = p.join(tmp.path, 'old-tools-vendor');
+        const manifest = '''
+// swift-tools-version:5.9
+import PackageDescription
+let package = Package(
+    name: "flutter_image_compress_common",
+    dependencies: [
+        .package(url: "https://github.com/SDWebImage/SDWebImageWebPCoder.git", from: "0.14.0"),
+    ],
+    targets: []
+)
+''';
+        final rewritten =
+            await GeneratedPluginsPackage.vendorUrlPackagesAsPathDeps(
+              manifest,
+              vendorDir: vendorDir,
+              packageDirectory: p.join(tmp.path, 'old-tools-plugin'),
+              locateTool: (_) async => 'git',
+              evaluateDependencyRefs: (_) async => const {
+                'https://github.com/SDWebImage/SDWebImageWebPCoder': 'sha-webp',
+                'https://github.com/SDWebImage/SDWebImage': 'sha-image',
+              },
+              clonePackage: (_, url, ref, destination) async {
+                await Directory(destination).create(recursive: true);
+                await File(p.join(destination, 'Package.swift')).writeAsString(
+                  url.contains('WebPCoder')
+                      ? '''
+// swift-tools-version:5.0
+import PackageDescription
+let package = Package(
+    name: "SDWebImageWebPCoder",
+    dependencies: [
+        .package(url: "https://github.com/SDWebImage/SDWebImage.git", from: "5.17.0"),
+    ],
+    targets: []
+)
+'''
+                      : '// swift-tools-version:5.0\n'
+                            'import PackageDescription\n'
+                            'let package = Package(name: "SDWebImage")\n',
+                );
+              },
+            );
+
+        // The 5.9 host manifest still gets the explicit name.
+        expect(rewritten, contains('.package(name: "SDWebImageWebPCoder"'));
+
+        // The vendored 5.0 manifest must not, or SwiftPM refuses to compile it.
+        final nested = File(
+          p.join(vendorDir, 'SDWebImageWebPCoder@sha-webp', 'Package.swift'),
+        ).readAsStringSync();
+        expect(nested, isNot(contains('url:')));
+        expect(nested, isNot(contains('.package(name:')));
+        expect(
+          nested,
+          contains(
+            '.package(path: '
+            '"${swiftPath(p.join(vendorDir, 'SDWebImage@sha-image'))}")',
+          ),
+        );
+      },
+    );
+
     test('vendors url deps declared through string constants', () async {
       final vendorDir = p.join(tmp.path, 'constant-vendor');
       const manifest = '''
