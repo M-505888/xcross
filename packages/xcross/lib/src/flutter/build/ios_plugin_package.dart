@@ -494,6 +494,29 @@ abstract final class GeneratedPluginsPackage {
       windows: windows,
     );
     final interopArguments = plannedSwiftInteropSearchPaths(targetBuildDir);
+    // The first plan run could not carry [interopArguments], because the
+    // paths it discovers are read out of the plan it produces. SwiftPM
+    // records the resulting command lines in `debug.yaml` and llbuild
+    // replays them verbatim, so without a second plan run every compile
+    // would execute with the pre-interop arguments no matter what this
+    // build passes. Re-planning rewrites the manifest with the search
+    // paths applied.
+    if (interopArguments.isNotEmpty) {
+      await buildTranslatingSdkMismatch(
+        () => ProcessRunner.runChecked(
+          swiftBuild,
+          [...baseArguments, ...interopArguments, '--print-manifest-job-graph'],
+          environment: environment,
+          label: 'swift build plan (interop)',
+          timeout: swiftResolveTimeout,
+        ),
+      );
+      await repairWindowsGeneratedBuildFiles(
+        scratchPath,
+        targetBuildDir,
+        windows: windows,
+      );
+    }
     Future<void> runBuild([List<String> selection = const []]) async {
       final arguments = <String>[
         ...baseArguments,
