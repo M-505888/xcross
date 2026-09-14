@@ -11,7 +11,7 @@ import 'package:meta/meta.dart';
 @internal
 const String anisetteClientInfo =
     '<MacBookPro13,2> <macOS;13.1;22C65> '
-    '<com.apple.AuthKit/1 (com.apple.dt.Xcode/3594.4.19)>';
+    '<com.apple.AuthKit/1 (com.apple.akd/1.0)>';
 
 const String _defaultLocale = 'en_US';
 const String _defaultTimeZone = 'America/Los_Angeles';
