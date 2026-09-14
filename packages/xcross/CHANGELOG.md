@@ -1,3 +1,9 @@
+## 1.4.2
+
+- Point GrandSlam anisette `X-MMe-Client-Info` at `akd/1.0` instead of an Xcode identity.
+- Prebuild planned Swift interop targets and re-plan the Swift build with those search paths, so `cloud_firestore` finds `FirebaseFirestore` on a cold Windows build.
+- Bound SwiftPM resolve, git clones, and binary-artifact downloads, fail instead of hanging on invisible git credential prompts, and surface SwiftPM's stdout diagnostic when resolve fails.
+
 ## 1.4.1
 
 - Vendor transitive SwiftPM dependencies faithfully: keep `.package(path:)` unnamed for manifests older than swift-tools-version 5.2, and initialize git submodules in vendored checkouts (fixes `flutter_image_compress`).
