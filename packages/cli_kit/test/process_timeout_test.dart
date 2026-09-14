@@ -97,5 +97,37 @@ void main() {
         ),
       );
     });
+
+    // `--verbose` routes builds through the inherit-stdio path. That path
+    // used to ignore `timeout` outright, so a stalled `swift package resolve`
+    // ran unbounded on CI even though the caller had asked for a limit.
+    test('applies to inheritStdio, which verbose builds use', () async {
+      final started = Stopwatch()..start();
+      await expectLater(
+        ProcessRunner.runChecked(
+          Platform.resolvedExecutable,
+          program(
+            'hang-inherit',
+            'import "dart:io";\n'
+                'import "dart:async";\n'
+                'void main() {\n'
+                '  stdin.listen((_) {});\n'
+                '  Timer(const Duration(minutes: 10), () {});\n'
+                '}\n',
+          ),
+          inheritStdio: true,
+          timeout: const Duration(seconds: 10),
+        ),
+        throwsA(
+          isA<CliError>().having(
+            (error) => error.toString(),
+            'message',
+            contains('timed out'),
+          ),
+        ),
+      );
+      started.stop();
+      expect(started.elapsed, lessThan(const Duration(minutes: 2)));
+    });
   });
 }

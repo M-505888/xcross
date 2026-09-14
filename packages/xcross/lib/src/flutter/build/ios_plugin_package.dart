@@ -485,6 +485,7 @@ abstract final class GeneratedPluginsPackage {
         [...baseArguments, '--print-manifest-job-graph'],
         environment: environment,
         label: 'swift build plan',
+        timeout: swiftResolveTimeout,
       ),
     );
     await repairWindowsGeneratedBuildFiles(
@@ -506,6 +507,7 @@ abstract final class GeneratedPluginsPackage {
         environment: environment,
         inheritStdio: windows && Log.isVerbose,
         label: 'swift build',
+        timeout: swiftBuildTimeout,
       );
       await repairWindowsGeneratedBuildFiles(
         scratchPath,
@@ -620,6 +622,56 @@ abstract final class GeneratedPluginsPackage {
     }
   }
 
+  /// How long `swift package resolve` may run before it is killed.
+  ///
+  /// Resolution spawns git per dependency, and any one of those can block
+  /// forever on a credential prompt or a dead remote. Generous enough for a
+  /// cold graph the size of firebase-ios-sdk, short enough that CI reports a
+  /// real error instead of burning the job's whole time budget in silence.
+  @visibleForTesting
+  static const swiftResolveTimeout = Duration(minutes: 30);
+
+  /// One `swift package resolve` attempt against [directory].
+  ///
+  /// SwiftPM resolves source-control dependencies by spawning git, so this
+  /// needs the same non-interactive settings as our own clones: otherwise a
+  /// moved or private dependency parks SwiftPM on an unanswerable credential
+  /// prompt.
+  static Future<void> _resolveOnce(String swift, String directory) async {
+    final result = await ProcessRunner.run(
+      swift,
+      [
+        if (!Platform.isWindows) 'package',
+        '--package-path',
+        directory,
+        'resolve',
+      ],
+      environment: swiftProcessEnvironment(),
+      // SwiftPM spawns git per dependency, and a URL-scoped credential helper
+      // is beyond the reach of any environment reset, so bound the whole
+      // resolution too.
+      timeout: swiftResolveTimeout,
+    );
+    if (result.timedOut) {
+      throw FlutterBuildError(
+        'Resolving SwiftPM dependencies in $directory took longer than '
+        '${swiftResolveTimeout.inMinutes} minutes and was stopped. This '
+        'usually means git is blocked on a credential prompt for a private '
+        'or moved dependency.\n${result.stderr.trim()}',
+      );
+    }
+    if (result.exitCode != 0) {
+      throw FlutterBuildError(
+        'Cannot resolve SwiftPM dependencies in $directory:\n'
+        '${result.stderr.trim()}',
+      );
+    }
+  }
+
+  /// How long a single `swift build` invocation may run before it is killed.
+  @visibleForTesting
+  static const swiftBuildTimeout = Duration(minutes: 60);
+
   /// Resolves Windows dependencies with the external toolset, materializes
   /// the Git-for-Windows symlink placeholders the resolve leaves behind, and
   /// normalizes the resulting Swift sources for host compatibility.
@@ -652,6 +704,15 @@ abstract final class GeneratedPluginsPackage {
       environment: environment,
       inheritStdio: Log.isVerbose,
       label: 'swift package resolve',
+      // This is the call that hung Windows CI for hours with no output:
+      // SwiftPM shells out to git per dependency and one of those can block
+      // indefinitely. Bound it so the build fails loudly instead of silently
+      // occupying the runner until the job limit.
+      timeout: swiftResolveTimeout,
+    );
+    Future<void> resolveWithRetries() => retryingTransientNetworkFailure(
+      resolve,
+      label: 'swift package resolve',
     );
     final attemptState = SwiftPmBinaryAttemptState();
     final packageIdentities = await _packageIdentitiesByDirectory(pluginsDir);
@@ -667,12 +728,80 @@ abstract final class GeneratedPluginsPackage {
       windows: true,
     );
     await resolveWindowsDependencies(
-      resolve: resolve,
+      resolve: resolveWithRetries,
       recoverBootstrap: recover,
       materialize: () => materializeCheckoutSymlinks(scratchPath),
       normalize: () => normalizeResolvedPackageManifests(scratchPath),
       recoverFinal: recover,
     );
+  }
+
+  /// Fragments that mark a dependency fetch as a transient network failure
+  /// rather than a real, reproducible error.
+  ///
+  /// Resolving this plugin graph pulls from a dozen GitHub repositories, and
+  /// a reset or refused connection on any one of them fails the whole build
+  /// even though a retry moments later succeeds.
+  @visibleForTesting
+  static const transientNetworkFailureMarkers = <String>[
+    'connection was reset',
+    'could not connect to server',
+    'failed to connect to',
+    'recv failure',
+    'send failure',
+    'operation timed out',
+    'connection timed out',
+    'empty reply from server',
+    'unexpected disconnect',
+    'early eof',
+    'rpc failed',
+    'the remote end hung up',
+    'temporary failure in name resolution',
+    'could not resolve host',
+    'ssl_read',
+    'gnutls_handshake',
+    'transfer closed',
+    'http/2 stream',
+    'couldn\u2019t fetch updates from remote repositories',
+    "couldn't fetch updates from remote repositories",
+  ];
+
+  @visibleForTesting
+  static bool isTransientNetworkFailure(Object error) {
+    final text = error.toString().toLowerCase();
+    // Our own timeout already waited the full budget; retrying it would
+    // multiply the very stall the timeout exists to cut short.
+    if (text.contains('and was killed')) return false;
+    return transientNetworkFailureMarkers.any(text.contains);
+  }
+
+  /// Runs [action], retrying while it fails for an apparently transient
+  /// network reason.
+  ///
+  /// Anything else propagates on the first attempt, so a genuine build error
+  /// still fails fast instead of being retried three times.
+  @visibleForTesting
+  static Future<void> retryingTransientNetworkFailure(
+    Future<void> Function() action, {
+    required String label,
+    int attempts = 3,
+    Duration backoff = const Duration(seconds: 5),
+    Future<void> Function(Duration)? delay,
+  }) async {
+    for (var attempt = 1; ; attempt++) {
+      try {
+        return await action();
+      } on Object catch (error) {
+        if (attempt >= attempts || !isTransientNetworkFailure(error)) rethrow;
+        final pause = backoff * attempt;
+        Log.logTrace(
+          '$label failed on a transient network error '
+          '(attempt $attempt of $attempts), retrying in '
+          '${pause.inSeconds}s: $error',
+        );
+        await (delay ?? Future<void>.delayed)(pause);
+      }
+    }
   }
 
   @visibleForTesting
@@ -1418,6 +1547,13 @@ abstract final class GeneratedPluginsPackage {
     // Git 2.36+ refuses a helper prompt outright; older Git ignores it and
     // relies on the reset above.
     (key: 'credential.interactive', value: 'false'),
+    // Abort a transfer that delivers less than 1 KiB/s for 60s rather than
+    // holding the connection open indefinitely. GitHub occasionally resets or
+    // silently drops these fetches, and SwiftPM inherits the stall: the build
+    // then sits with no output until the CI job is killed. With this, git
+    // fails fast and the error is visible and retryable.
+    (key: 'http.lowSpeedLimit', value: '1024'),
+    (key: 'http.lowSpeedTime', value: '60'),
     if (windows) (key: 'core.symlinks', value: 'false'),
   ];
 
@@ -4101,41 +4237,10 @@ let package = Package(
     );
     final runResolve =
         resolve ??
-        (directory) async {
-          // SwiftPM resolves source-control dependencies by spawning git,
-          // so this needs the same non-interactive settings as our own
-          // clones: otherwise a moved or private dependency parks SwiftPM
-          // on an unanswerable credential prompt.
-          final result = await ProcessRunner.run(
-            swift,
-            [
-              if (!Platform.isWindows) 'package',
-              '--package-path',
-              directory,
-              'resolve',
-            ],
-            environment: swiftProcessEnvironment(),
-            // SwiftPM spawns git per dependency, and a URL-scoped credential
-            // helper is beyond the reach of any environment reset, so bound
-            // the whole resolution too. This covers a graph the size of
-            // firebase-ios-sdk many times over.
-            timeout: const Duration(minutes: 30),
-          );
-          if (result.timedOut) {
-            throw FlutterBuildError(
-              'Resolving SwiftPM dependencies in $directory took longer than '
-              '30 minutes and was stopped. This usually means git is blocked '
-              'on a credential prompt for a private or moved dependency.\n'
-              '${result.stderr.trim()}',
-            );
-          }
-          if (result.exitCode != 0) {
-            throw FlutterBuildError(
-              'Cannot resolve SwiftPM dependencies in $directory:\n'
-              '${result.stderr.trim()}',
-            );
-          }
-        };
+        (directory) => retryingTransientNetworkFailure(
+          () => _resolveOnce(swift, directory),
+          label: 'swift package resolve',
+        );
     // `swift package --package-path <directory> resolve` uses
     // `<directory>/.build`; it does not share the final build's explicit
     // scratch path. Recovery must inspect the checkouts and artifacts from

@@ -265,6 +265,7 @@ abstract final class ProcessRunner {
         environment: environment,
         tail: tail,
         forwardStdin: forwardStdin,
+        timeout: timeout,
       );
     }
     if (inheritStdio) {
@@ -273,6 +274,7 @@ abstract final class ProcessRunner {
         arguments,
         workingDirectory: workingDirectory,
         environment: environment,
+        timeout: timeout,
       );
     }
     return _runCaptured(
@@ -318,6 +320,7 @@ abstract final class ProcessRunner {
     List<String> arguments, {
     String? workingDirectory,
     Map<String, String>? environment,
+    Duration? timeout,
   }) async {
     final process = await Process.start(
       _resolvedExecutable(executable),
@@ -327,10 +330,39 @@ abstract final class ProcessRunner {
       includeParentEnvironment: _inheritParentEnvironment,
       mode: ProcessStartMode.inheritStdio,
     );
-    final code = await process.exitCode;
+    final code = await _awaitExitWithin(
+      process,
+      timeout,
+      executable,
+      arguments,
+    );
     if (code != 0) {
       throw CliError(
         _failureMessage(executable, arguments, code, captured: false),
+      );
+    }
+  }
+
+  /// Waits for [process], killing its whole tree if [timeout] elapses.
+  ///
+  /// A hung child otherwise blocks forever. `--verbose` routes builds through
+  /// the inherit-stdio path, so without this a timeout passed by the caller
+  /// would be silently ignored there, which is exactly how a stalled SwiftPM
+  /// resolve ran until the CI job limit.
+  static Future<int> _awaitExitWithin(
+    Process process,
+    Duration? timeout,
+    String executable,
+    List<String> arguments,
+  ) async {
+    if (timeout == null) return process.exitCode;
+    try {
+      return await process.exitCode.timeout(timeout);
+    } on TimeoutException {
+      await killTree(process);
+      throw CliError(
+        'command timed out after ${timeout.inSeconds}s and was killed: '
+        '${commandLine(executable, arguments)}',
       );
     }
   }
@@ -372,6 +404,7 @@ abstract final class ProcessRunner {
     String? workingDirectory,
     Map<String, String>? environment,
     bool forwardStdin = true,
+    Duration? timeout,
   }) async {
     final process = await Process.start(
       _resolvedExecutable(executable),
@@ -408,7 +441,12 @@ abstract final class ProcessRunner {
     }
 
     try {
-      final code = await process.exitCode;
+      final code = await _awaitExitWithin(
+        process,
+        timeout,
+        executable,
+        arguments,
+      );
       await input?.cancel();
       input = null;
       await drained;

@@ -4124,15 +4124,20 @@ module FirebaseFirestore {
       );
       expect(GeneratedPluginsPackage.swiftProcessEnvironment(windows: true), {
         ...GeneratedPluginsPackage.nonInteractiveGitEnvironment,
-        'GIT_CONFIG_COUNT': '3',
+        'GIT_CONFIG_COUNT': '5',
         'GIT_CONFIG_KEY_0': 'credential.helper',
         // Two quotes, not the empty string: git rejects a genuinely empty
         // GIT_CONFIG_VALUE_* and would then fail every command.
         'GIT_CONFIG_VALUE_0': '""',
         'GIT_CONFIG_KEY_1': 'credential.interactive',
         'GIT_CONFIG_VALUE_1': 'false',
-        'GIT_CONFIG_KEY_2': 'core.symlinks',
-        'GIT_CONFIG_VALUE_2': 'false',
+        // Abort a stalled fetch instead of holding it open forever.
+        'GIT_CONFIG_KEY_2': 'http.lowSpeedLimit',
+        'GIT_CONFIG_VALUE_2': '1024',
+        'GIT_CONFIG_KEY_3': 'http.lowSpeedTime',
+        'GIT_CONFIG_VALUE_3': '60',
+        'GIT_CONFIG_KEY_4': 'core.symlinks',
+        'GIT_CONFIG_VALUE_4': 'false',
         'EXPERIMENTAL_SPM_BUILDS': '1',
       });
     });
@@ -4161,11 +4166,15 @@ module FirebaseFirestore {
       )!;
       expect(posix.containsKey('EXPERIMENTAL_SPM_BUILDS'), isFalse);
       // Only the credential settings, never the Windows symlink lane.
-      expect(posix['GIT_CONFIG_COUNT'], '2');
+      expect(posix['GIT_CONFIG_COUNT'], '4');
       expect(posix['GIT_CONFIG_KEY_0'], 'credential.helper');
       expect(posix['GIT_CONFIG_VALUE_0'], '""');
       expect(posix['GIT_CONFIG_KEY_1'], 'credential.interactive');
-      expect(posix.containsKey('GIT_CONFIG_KEY_2'), isFalse);
+      expect(posix.containsKey('GIT_CONFIG_KEY_4'), isFalse);
+      expect(
+        [posix['GIT_CONFIG_KEY_2'], posix['GIT_CONFIG_KEY_3']],
+        ['http.lowSpeedLimit', 'http.lowSpeedTime'],
+      );
     });
 
     test('disables every configured git credential helper', () {
