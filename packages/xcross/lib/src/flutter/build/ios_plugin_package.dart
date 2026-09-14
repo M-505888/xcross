@@ -501,7 +501,14 @@ abstract final class GeneratedPluginsPackage {
     // would execute with the pre-interop arguments no matter what this
     // build passes. Re-planning rewrites the manifest with the search
     // paths applied.
-    if (interopArguments.isNotEmpty) {
+    //
+    // The rewrite only has to happen when the manifest does not already
+    // carry the paths. Re-planning unconditionally costs a whole extra
+    // `swift build` planning process (~13s on Windows for
+    // examples/flutter_example) on every build including incremental ones,
+    // to reproduce a manifest that is already byte-identical.
+    if (interopArguments.isNotEmpty &&
+        !manifestCarriesInteropSearchPaths(scratchPath, interopArguments)) {
       await buildTranslatingSdkMismatch(
         () => ProcessRunner.runChecked(
           swiftBuild,
@@ -1413,8 +1420,6 @@ abstract final class GeneratedPluginsPackage {
     for (final target in planned) {
       await buildTarget(target);
     }
-    if (planned.isNotEmpty) await repair();
-
     await repair();
     if (!skipInitialRecovery && await recoverMissingTargets()) {
       await build();
@@ -1447,6 +1452,12 @@ abstract final class GeneratedPluginsPackage {
   }) {
     final directory = Directory(targetBuildDir);
     if (!directory.existsSync()) return const [];
+    // A target the aggregate never reaches is never scheduled, so it cannot
+    // be the one whose header a consumer raced. Its module map still names
+    // an `-Swift.h` that no build will ever write, so without this filter
+    // recovery rebuilds the same targets on every single run and never
+    // converges. See [plannedSwiftInteropTargets] for the same reasoning.
+    final reachable = plannedTargetClosure(targetBuildDir, _pluginsProductName);
     final targets = <String>{};
     final headerPattern = RegExp(r'\bheader\s+"([^"]+-Swift\.h)"');
     for (final entity in directory.listSync(followLinks: false)) {
@@ -1469,6 +1480,7 @@ abstract final class GeneratedPluginsPackage {
           0,
           basename.length - '-Swift.h'.length,
         );
+        if (reachable != null && !reachable.contains(target)) continue;
         if (candidates.contains(target)) targets.add(target);
       }
     }
@@ -1793,6 +1805,16 @@ abstract final class GeneratedPluginsPackage {
     } on Object {
       return const [];
     }
+    // Only a target the aggregate actually reaches can be compiled by the
+    // aggregate build, so only such a target can lose the header race the
+    // prepass exists to prevent. The plan lists every target in the resolved
+    // dependency graph, including the ones no product here depends on:
+    // measured on examples/flutter_example that is 18 of 37, and each one
+    // costs a whole `swift build` process (~4-13s on Windows) that can never
+    // emit its header, because nothing schedules the target that would.
+    // Prebuilding them was therefore pure latency, paid on every build,
+    // forever: 13 unreachable targets re-prebuilt on each incremental run.
+    final reachable = plannedTargetClosure(targetBuildDir, _pluginsProductName);
     final targets = <String>{};
     for (final argument in planned) {
       final directory = p.basename(argument);
@@ -1801,11 +1823,82 @@ abstract final class GeneratedPluginsPackage {
       if (!owner.endsWith('.build')) continue;
       final target = owner.substring(0, owner.length - '.build'.length);
       if (!candidates.contains(target)) continue;
+      // A null closure means the plan carried no dependency map to filter
+      // with, so fall back to the unfiltered set rather than skipping the
+      // prepass and reintroducing the race.
+      if (reachable != null && !reachable.contains(target)) continue;
       if (File(p.join(argument, '$target-Swift.h')).existsSync()) continue;
       targets.add(target);
     }
     final sorted = targets.toList()..sort();
     return sorted;
+  }
+
+  /// [root] and every target reachable from it in the plan's dependency map.
+  ///
+  /// Returns null when the plan carries no usable dependency map, so callers
+  /// can tell "nothing is reachable" apart from "reachability is unknown".
+  @visibleForTesting
+  static Set<String>? plannedTargetClosure(String targetBuildDir, String root) {
+    final description = File(p.join(targetBuildDir, 'description.json'));
+    final Map<String, List<String>> edges;
+    try {
+      final decoded = jsonDecode(description.readAsStringSync());
+      if (decoded is! Map<String, dynamic>) return null;
+      final map = decoded['targetDependencyMap'];
+      if (map is! Map<String, dynamic>) return null;
+      edges = {
+        for (final entry in map.entries)
+          if (entry.value case final List<dynamic> dependencies)
+            entry.key: [
+              for (final dependency in dependencies)
+                if (dependency is String) dependency,
+            ],
+      };
+    } on Object {
+      return null;
+    }
+    if (edges.isEmpty) return null;
+    final seen = <String>{root};
+    final stack = <String>[root];
+    while (stack.isNotEmpty) {
+      for (final next in edges[stack.removeLast()] ?? const <String>[]) {
+        if (seen.add(next)) stack.add(next);
+      }
+    }
+    return seen;
+  }
+
+  /// Whether the llbuild manifest already applies every interop search path.
+  ///
+  /// llbuild replays the command lines recorded in `debug.yaml` verbatim, so
+  /// a manifest that already names each path produces exactly the build a
+  /// re-plan would produce. The manifest is JSON-quoted, so the separators
+  /// of a Windows path appear escaped.
+  @visibleForTesting
+  static bool manifestCarriesInteropSearchPaths(
+    String scratchPath,
+    List<String> interopArguments,
+  ) {
+    final manifest = File(p.join(scratchPath, 'debug.yaml'));
+    final String text;
+    try {
+      text = manifest.readAsStringSync();
+    } on Object {
+      return false;
+    }
+    if (text.isEmpty) return false;
+    var checked = 0;
+    // [plannedSwiftInteropSearchPaths] emits each include as the quadruple
+    // `-Xcc -I -Xcc <path>`, so the path follows the `-I` across the `-Xcc`
+    // that forwards it to Clang.
+    for (var index = 0; index + 2 < interopArguments.length; index++) {
+      if (interopArguments[index] != '-I') continue;
+      if (interopArguments[index + 1] != '-Xcc') continue;
+      checked++;
+      if (!text.contains(jsonEncode(interopArguments[index + 2]))) return false;
+    }
+    return checked > 0;
   }
 
   /// Search-path arguments for the Objective-C interop modules SwiftPM

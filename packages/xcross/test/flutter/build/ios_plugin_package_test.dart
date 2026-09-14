@@ -3739,6 +3739,119 @@ let package = Package(
       );
     });
 
+    test('skips prebuilding targets the aggregate cannot reach', () {
+      // The plan lists every target in the resolved dependency graph, not
+      // just the ones this build compiles. A target no product depends on is
+      // never scheduled, so it can never lose the header race the prepass
+      // exists to prevent, and its header never appears however many times
+      // it is prebuilt. Each such prebuild is a whole `swift build` process.
+      final buildDir = p.join(tmp.path, 'arm64-apple-ios', 'debug');
+      final headers = {
+        'Reachable': p.join(
+          buildDir,
+          'Reachable.build',
+          'include',
+          'Reachable-Swift.h',
+        ),
+        'Orphan': p.join(buildDir, 'Orphan.build', 'include', 'Orphan-Swift.h'),
+      };
+      Directory(buildDir).createSync(recursive: true);
+      File(p.join(buildDir, 'description.json')).writeAsStringSync(
+        jsonEncode({
+          'swiftCommands': {
+            for (final entry in headers.entries)
+              entry.key: {
+                'otherArguments': ['-emit-objc-header-path', entry.value],
+              },
+          },
+          'targetDependencyMap': {
+            'FlutterPluginsGenerated': ['Reachable'],
+            'Reachable': <String>[],
+            'Orphan': <String>[],
+          },
+        }),
+      );
+
+      expect(
+        GeneratedPluginsPackage.plannedSwiftInteropTargets(
+          buildDir,
+          candidates: const {'Reachable', 'Orphan'},
+        ),
+        ['Reachable'],
+      );
+    });
+
+    test('prebuilds unfiltered when the plan carries no dependency map', () {
+      // Reachability is an optimisation. Without a map to filter with, the
+      // full set must still be prebuilt rather than silently skipping the
+      // prepass and reintroducing the header race.
+      final buildDir = p.join(tmp.path, 'no-map', 'arm64-apple-ios', 'debug');
+      final header = p.join(
+        buildDir,
+        'Reachable.build',
+        'include',
+        'Reachable-Swift.h',
+      );
+      Directory(buildDir).createSync(recursive: true);
+      File(p.join(buildDir, 'description.json')).writeAsStringSync(
+        jsonEncode({
+          'swiftCommands': {
+            'Reachable': {
+              'otherArguments': ['-emit-objc-header-path', header],
+            },
+          },
+        }),
+      );
+
+      expect(
+        GeneratedPluginsPackage.plannedSwiftInteropTargets(
+          buildDir,
+          candidates: const {'Reachable'},
+        ),
+        ['Reachable'],
+      );
+    });
+
+    test('reports whether the manifest already carries the interop paths', () {
+      // llbuild replays the command lines stored in `debug.yaml` verbatim, so
+      // a manifest that already names every path builds exactly what a
+      // re-plan would. Re-planning anyway costs a whole extra planning
+      // process on every build, incremental ones included.
+      final scratch = p.join(tmp.path, 'scratch');
+      Directory(scratch).createSync(recursive: true);
+      final include = p.join(scratch, 'arm64-apple-ios', 'debug', 'A.build');
+      final arguments = ['-Xcc', '-I', '-Xcc', include];
+
+      expect(
+        GeneratedPluginsPackage.manifestCarriesInteropSearchPaths(
+          scratch,
+          arguments,
+        ),
+        isFalse,
+        reason: 'no manifest has been written yet',
+      );
+
+      final manifest = File(p.join(scratch, 'debug.yaml'));
+      manifest.writeAsStringSync('"-I","/somewhere/else"');
+      expect(
+        GeneratedPluginsPackage.manifestCarriesInteropSearchPaths(
+          scratch,
+          arguments,
+        ),
+        isFalse,
+      );
+
+      // The manifest is JSON-quoted, so a Windows path appears escaped.
+      manifest.writeAsStringSync('"-I",${jsonEncode(include)}');
+      expect(
+        GeneratedPluginsPackage.manifestCarriesInteropSearchPaths(
+          scratch,
+          arguments,
+        ),
+        isTrue,
+      );
+    });
+
     test(
       'prebuilds planned interop targets before the aggregate build',
       () async {
