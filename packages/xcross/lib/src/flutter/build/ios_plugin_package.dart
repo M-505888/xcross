@@ -657,16 +657,29 @@ abstract final class GeneratedPluginsPackage {
         'Resolving SwiftPM dependencies in $directory took longer than '
         '${swiftResolveTimeout.inMinutes} minutes and was stopped. This '
         'usually means git is blocked on a credential prompt for a private '
-        'or moved dependency.\n${result.stderr.trim()}',
+        'or moved dependency.\n${resolveDiagnostics(result)}',
       );
     }
     if (result.exitCode != 0) {
       throw FlutterBuildError(
         'Cannot resolve SwiftPM dependencies in $directory:\n'
-        '${result.stderr.trim()}',
+        '${resolveDiagnostics(result)}',
       );
     }
   }
+
+  /// Both output streams of a failed resolve, in that order.
+  ///
+  /// SwiftPM reports fetch progress on stderr but writes the diagnostic that
+  /// explains a failure to stdout, so reporting stderr alone produced CI logs
+  /// that ended on a successful "Computed ..." line with no stated reason.
+  /// The combined text is also what [isTransientNetworkFailure] matches on,
+  /// so a reset that SwiftPM reports on stdout is still retried.
+  @visibleForTesting
+  static String resolveDiagnostics(CapturedProcess result) => [
+    result.stdout.trim(),
+    result.stderr.trim(),
+  ].where((stream) => stream.isNotEmpty).join('\n');
 
   /// How long a single `swift build` invocation may run before it is killed.
   @visibleForTesting

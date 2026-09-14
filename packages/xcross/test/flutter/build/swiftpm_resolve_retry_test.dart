@@ -1,3 +1,4 @@
+import 'package:cli_kit/cli_kit.dart';
 import 'package:test/test.dart';
 import 'package:xcross/src/flutter/build/ios_plugin_package.dart';
 
@@ -119,6 +120,41 @@ void main() {
         delay: (_) async => called = true,
       );
       expect(called, isFalse);
+    });
+  });
+
+  group('resolveDiagnostics', () {
+    test('reports the stdout diagnostic SwiftPM failures are explained on', () {
+      // The Windows CI failure printed fetch progress on stderr and the
+      // reason on stdout, so a stderr-only message ended on a successful
+      // "Computed ..." line and never said what went wrong.
+      final text = GeneratedPluginsPackage.resolveDiagnostics(
+        const CapturedProcess(
+          1,
+          "error: Dependencies could not be resolved because "
+              "no versions of 'sdwebimage' match the requirement",
+          'Computed https://github.com/SDWebImage/SDWebImage.git at 5.21.7',
+        ),
+      );
+      expect(text, contains('no versions of'));
+      expect(text, contains('Computed https://github.com'));
+    });
+
+    test('retries a transient failure SwiftPM reported on stdout', () {
+      final text = GeneratedPluginsPackage.resolveDiagnostics(
+        const CapturedProcess(1, 'error: Recv failure: Connection was reset', ''),
+      );
+      expect(
+        GeneratedPluginsPackage.isTransientNetworkFailure(text),
+        isTrue,
+      );
+    });
+
+    test('omits an empty stream instead of leaving a blank line', () {
+      final text = GeneratedPluginsPackage.resolveDiagnostics(
+        const CapturedProcess(1, '', 'only stderr'),
+      );
+      expect(text, 'only stderr');
     });
   });
 }
