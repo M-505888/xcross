@@ -3662,6 +3662,128 @@ let package = Package(
       );
     });
 
+    test(
+      'names the planned interop targets whose header is not yet on disk',
+      () {
+        // On a cold build no module map exists yet, so scanning the build
+        // directory finds nothing to prebuild. Reading the plan is what makes
+        // the prepass see the work before the first compile.
+        final buildDir = p.join(tmp.path, 'arm64-apple-ios', 'debug');
+        final headers = [
+          p.join(
+            buildDir,
+            'FirebaseFirestore.build',
+            'include',
+            'FirebaseFirestore-Swift.h',
+          ),
+          p.join(
+            buildDir,
+            'FirebaseAuth.build',
+            'include',
+            'FirebaseAuth-Swift.h',
+          ),
+          p.join(buildDir, 'Unrelated.build', 'include', 'Unrelated-Swift.h'),
+        ];
+        Directory(buildDir).createSync(recursive: true);
+        File(p.join(buildDir, 'description.json')).writeAsStringSync(
+          jsonEncode({
+            'swiftCommands': {
+              for (var index = 0; index < headers.length; index++)
+                'command$index': {
+                  'otherArguments': ['-emit-objc-header-path', headers[index]],
+                },
+            },
+          }),
+        );
+
+        expect(
+          GeneratedPluginsPackage.missingSwiftInteropTargets(
+            buildDir,
+            candidates: const {'FirebaseFirestore', 'FirebaseAuth'},
+          ),
+          isEmpty,
+          reason: 'no module map has been written yet',
+        );
+        expect(
+          GeneratedPluginsPackage.plannedSwiftInteropTargets(
+            buildDir,
+            candidates: const {'FirebaseFirestore', 'FirebaseAuth'},
+          ),
+          ['FirebaseAuth', 'FirebaseFirestore'],
+        );
+
+        File(headers[1]).parent.createSync(recursive: true);
+        File(headers[1]).writeAsStringSync('// generated');
+        expect(
+          GeneratedPluginsPackage.plannedSwiftInteropTargets(
+            buildDir,
+            candidates: const {'FirebaseFirestore', 'FirebaseAuth'},
+          ),
+          ['FirebaseFirestore'],
+          reason: 'a header already on disk needs no prebuild',
+        );
+      },
+    );
+
+    test('treats an unreadable plan as nothing to prebuild', () {
+      // The prepass is an optimisation over the existing recovery, so a
+      // missing plan must not fail the build.
+      final buildDir = p.join(tmp.path, 'no-plan');
+      Directory(buildDir).createSync(recursive: true);
+      expect(
+        GeneratedPluginsPackage.plannedSwiftInteropTargets(
+          buildDir,
+          candidates: const {'FirebaseFirestore'},
+        ),
+        isEmpty,
+      );
+    });
+
+    test(
+      'prebuilds planned interop targets before the aggregate build',
+      () async {
+        final buildDir = p.join(tmp.path, 'arm64-apple-ios', 'debug');
+        final header = p.join(
+          buildDir,
+          'FirebaseFirestore.build',
+          'include',
+          'FirebaseFirestore-Swift.h',
+        );
+        Directory(buildDir).createSync(recursive: true);
+        File(p.join(buildDir, 'description.json')).writeAsStringSync(
+          jsonEncode({
+            'swiftCommands': {
+              'c0': {
+                'otherArguments': ['-emit-objc-header-path', header],
+              },
+            },
+          }),
+        );
+
+        final events = <String>[];
+        await GeneratedPluginsPackage.buildWithInteropRecovery(
+          targetBuildDir: buildDir,
+          interopTargetCandidates: const {'FirebaseFirestore'},
+          windows: false,
+          skipInitialRecovery: true,
+          build: () async => events.add('build'),
+          buildTarget: (target) async {
+            events.add('target:$target');
+            File(header).parent.createSync(recursive: true);
+            File(header).writeAsStringSync('// generated');
+          },
+          repairConsumers: () async => events.add('repair'),
+        );
+
+        expect(
+          events.indexOf('target:FirebaseFirestore') < events.indexOf('build'),
+          isTrue,
+          reason: 'the header must exist before consumers are compiled',
+        );
+        expect(events.where((event) => event == 'build'), hasLength(1));
+      },
+    );
+
     test('rejects missing and malformed Swift planning descriptions', () {
       final buildDir = p.join(tmp.path, 'arm64-apple-ios', 'debug');
       Directory(buildDir).createSync(recursive: true);

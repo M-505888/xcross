@@ -1375,6 +1375,23 @@ abstract final class GeneratedPluginsPackage {
       return targets.isNotEmpty;
     }
 
+    // Prebuild every target the plan says will emit a `-Swift.h`, before any
+    // consumer of it is scheduled. Recovering after the fact cannot be made
+    // reliable here: SwiftPM compiles an Objective-C consumer concurrently
+    // with the Swift target whose header it imports, so whether the build
+    // succeeds depends on which finishes first. That is why the same
+    // checkout failed on `header not found`, then on `module not found`, then
+    // elsewhere, moving a little further each run as another header happened
+    // to land.
+    final planned = plannedSwiftInteropTargets(
+      targetBuildDir,
+      candidates: interopTargetCandidates,
+    );
+    for (final target in planned) {
+      await buildTarget(target);
+    }
+    if (planned.isNotEmpty) await repair();
+
     await repair();
     if (!skipInitialRecovery && await recoverMissingTargets()) {
       await build();
@@ -1726,6 +1743,46 @@ abstract final class GeneratedPluginsPackage {
         '${description.path}: $error',
       );
     }
+  }
+
+  /// Targets the build plan says will emit a `-Swift.h` that is not on disk.
+  ///
+  /// Unlike [missingSwiftInteropTargets], which can only see a module map
+  /// SwiftPM has already written, this reads the plan, so it knows the full
+  /// set before the first compile. That difference is what makes the prepass
+  /// deterministic: on a cold build no module map exists yet, so scanning the
+  /// build directory finds nothing to prebuild and the race is entered
+  /// anyway.
+  ///
+  /// Names are returned in plan order so the prepass is reproducible.
+  @visibleForTesting
+  static List<String> plannedSwiftInteropTargets(
+    String targetBuildDir, {
+    required Set<String> candidates,
+  }) {
+    // The plan is an optimisation for the prepass, not a requirement: without
+    // it the existing after-the-fact recovery still runs. A build directory
+    // with no readable plan therefore means "nothing to prebuild", not a
+    // build failure.
+    final List<String> planned;
+    try {
+      planned = plannedSwiftInteropSearchPaths(targetBuildDir);
+    } on Object {
+      return const [];
+    }
+    final targets = <String>{};
+    for (final argument in planned) {
+      final directory = p.basename(argument);
+      if (directory != 'include') continue;
+      final owner = p.basename(p.dirname(argument));
+      if (!owner.endsWith('.build')) continue;
+      final target = owner.substring(0, owner.length - '.build'.length);
+      if (!candidates.contains(target)) continue;
+      if (File(p.join(argument, '$target-Swift.h')).existsSync()) continue;
+      targets.add(target);
+    }
+    final sorted = targets.toList()..sort();
+    return sorted;
   }
 
   /// Search-path arguments for the Objective-C interop modules SwiftPM
@@ -5308,14 +5365,12 @@ let package = Package(
 
     if (File(p.join(destination, '.git')).existsSync() ||
         Directory(p.join(destination, '.git')).existsSync()) {
-      final head = await ProcessRunner.run(git, [
-        ...gitConfig,
-        '-C',
-        destination,
-        'rev-parse',
-        '--verify',
-        'HEAD',
-      ], environment: environment, timeout: timeout);
+      final head = await ProcessRunner.run(
+        git,
+        [...gitConfig, '-C', destination, 'rev-parse', '--verify', 'HEAD'],
+        environment: environment,
+        timeout: timeout,
+      );
       if (head.exitCode == 0 &&
           head.stdout.trim().toLowerCase() == ref.toLowerCase()) {
         await ProcessRunner.runChecked(
@@ -5332,16 +5387,21 @@ let package = Package(
     await _deleteEntity(destination);
     await destDir.parent.create(recursive: true);
 
-    final shallow = await ProcessRunner.run(git, [
-      ...gitConfig,
-      'clone',
-      '--depth',
-      '1',
-      '--branch',
-      ref,
-      url,
-      destination,
-    ], environment: environment, timeout: timeout);
+    final shallow = await ProcessRunner.run(
+      git,
+      [
+        ...gitConfig,
+        'clone',
+        '--depth',
+        '1',
+        '--branch',
+        ref,
+        url,
+        destination,
+      ],
+      environment: environment,
+      timeout: timeout,
+    );
     if (shallow.exitCode == 0) {
       await updateSubmodules();
       return;
@@ -5349,33 +5409,43 @@ let package = Package(
 
     await _deleteEntity(destination);
     await Directory(destination).create(recursive: true);
-    final init = await ProcessRunner.run(git, [
-      ...gitConfig,
-      '-C',
-      destination,
-      'init',
-    ], environment: environment, timeout: timeout);
+    final init = await ProcessRunner.run(
+      git,
+      [...gitConfig, '-C', destination, 'init'],
+      environment: environment,
+      timeout: timeout,
+    );
     final fetch = init.exitCode == 0
-        ? await ProcessRunner.run(git, [
-            ...gitConfig,
-            '-C',
-            destination,
-            'fetch',
-            '--depth',
-            '1',
-            url,
-            ref,
-          ], environment: environment, timeout: timeout)
+        ? await ProcessRunner.run(
+            git,
+            [
+              ...gitConfig,
+              '-C',
+              destination,
+              'fetch',
+              '--depth',
+              '1',
+              url,
+              ref,
+            ],
+            environment: environment,
+            timeout: timeout,
+          )
         : init;
     final checkout = fetch.exitCode == 0
-        ? await ProcessRunner.run(git, [
-            ...gitConfig,
-            '-C',
-            destination,
-            'checkout',
-            '--detach',
-            'FETCH_HEAD',
-          ], environment: environment, timeout: timeout)
+        ? await ProcessRunner.run(
+            git,
+            [
+              ...gitConfig,
+              '-C',
+              destination,
+              'checkout',
+              '--detach',
+              'FETCH_HEAD',
+            ],
+            environment: environment,
+            timeout: timeout,
+          )
         : fetch;
     if (checkout.exitCode == 0) {
       await updateSubmodules();
