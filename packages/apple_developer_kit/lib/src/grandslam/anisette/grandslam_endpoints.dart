@@ -7,6 +7,7 @@
 /// `ProvisioningSession.loadURLBag` and xtool's `GrandSlamLookupManager`.
 library;
 
+import 'package:apple_developer_kit/src/apple_http_client.dart';
 import 'package:apple_developer_kit/src/errors.dart';
 import 'package:http/http.dart' as http;
 import 'package:meta/meta.dart';
@@ -98,6 +99,11 @@ final class GrandSlamEndpoints {
     if (body != null) request.body = body;
 
     final response = await http.Response.fromStream(await client.send(request));
+    AppleHttp.checkRateLimit(
+      response,
+      operation:
+          'GrandSlam $operation (${request.url.host}${request.url.path})',
+    );
     if (response.statusCode >= 300 && response.statusCode < 400) {
       throw AppleError('GrandSlam $operation refused an HTTP redirect.');
     }

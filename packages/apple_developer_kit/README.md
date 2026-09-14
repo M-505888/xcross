@@ -61,6 +61,25 @@ final login = await client.login(
 client.close();
 ```
 
+### Troubleshooting Apple ID login
+
+- **HTTP 503 and Xcode client-info:** Apple's GrandSlam edge rejects
+  `X-MMe-Client-Info` containing `com.apple.dt.Xcode`, as documented in
+  [anisette-v3-server #59](https://github.com/Dadoum/anisette-v3-server/issues/59).
+  The built-in provider and GSA requests use `com.apple.akd/1.0`. Custom providers
+  must supply compatible client-info too. The Developer Services app identifier
+  `com.apple.gs.xcode.auth` is a separate value and must not be replaced.
+- **HTTP 429:** this is throttling, not the Xcode-related 503. GrandSlam and
+  Developer Services report `AppleRateLimitError` with the failing operation and
+  a parsed `retryAfter` duration when Apple provides one (seconds or HTTP date).
+  Requests are not automatically replayed. Wait at least the stated duration.
+  If Apple provides no usable duration, stop repeated attempts and try later.
+  Changing client-info does not remove an existing server-side cooldown.
+- Do not run `xcross auth clear`, delete ADI/Anisette state, or reset your password
+  to address a 429. Keep the existing machine identity and saved session. If it
+  persists, report the failing operation and HTTP status, not passwords, tokens,
+  Anisette headers, or session files.
+
 ### App Store Connect development provisioning
 
 ```dart
