@@ -1014,11 +1014,25 @@ abstract final class GeneratedPluginsPackage {
   }) async {
     try {
       await resolve();
-    } on Object {
+    } on Object catch (error) {
+      // A resolve we killed for exceeding its own timeout is not a missing
+      // binary artifact, and re-running it just waits out the same stall
+      // again. Two such rounds are what kept the Windows job alive to the
+      // 90-minute job limit even after the timeout started firing.
+      if (isResolveTimeout(error)) rethrow;
       if (!await recover()) rethrow;
       await resolve();
     }
   }
+
+  /// Whether [error] is a resolve this tool killed for exceeding its timeout.
+  ///
+  /// Distinguishes our own deliberate kill from a failure of the work, so
+  /// recovery and retry paths can decline to run the same stall again.
+  @visibleForTesting
+  static bool isResolveTimeout(Object error) =>
+      error.toString().contains('and was killed') ||
+      error.toString().contains('took longer than');
 
   @visibleForTesting
   static Future<SwiftPmBinaryArtifactPublication?> recoverFinalBinaryArtifact({

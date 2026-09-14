@@ -131,8 +131,8 @@ void main() {
       final text = GeneratedPluginsPackage.resolveDiagnostics(
         const CapturedProcess(
           1,
-          "error: Dependencies could not be resolved because "
-              "no versions of 'sdwebimage' match the requirement",
+          'error: Dependencies could not be resolved because no versions '
+              "of 'sdwebimage' match the requirement",
           'Computed https://github.com/SDWebImage/SDWebImage.git at 5.21.7',
         ),
       );
@@ -155,6 +155,64 @@ void main() {
         const CapturedProcess(1, '', 'only stderr'),
       );
       expect(text, 'only stderr');
+    });
+  });
+
+  group('resolveWithFinalBinaryRecovery', () {
+    test('recovers and retries an ordinary resolve failure', () async {
+      var resolves = 0;
+      var recovered = false;
+      await GeneratedPluginsPackage.resolveWithFinalBinaryRecovery(
+        resolve: () async {
+          if (resolves++ == 0) throw StateError('missing binary artifact');
+        },
+        recover: () async => recovered = true,
+      );
+      expect(resolves, 2);
+      expect(recovered, isTrue);
+    });
+
+    test('does not run a resolve again after we killed it for timing out',
+        () async {
+      // Re-running waits out the same stall, which is how the Windows job
+      // kept burning to the job limit even once the timeout fired.
+      var resolves = 0;
+      var recovered = false;
+      await expectLater(
+        GeneratedPluginsPackage.resolveWithFinalBinaryRecovery(
+          resolve: () {
+            resolves++;
+            throw StateError(
+              'command timed out after 1800s and was killed: swift-package',
+            );
+          },
+          recover: () async {
+            recovered = true;
+            return true;
+          },
+        ),
+        throwsA(isA<StateError>()),
+      );
+      expect(resolves, 1);
+      expect(recovered, isFalse);
+    });
+
+    test('treats the resolve-specific timeout message as terminal too', () {
+      expect(
+        GeneratedPluginsPackage.isResolveTimeout(
+          StateError(
+            r'Resolving SwiftPM dependencies in C:\p took longer than 30 '
+            'minutes and was stopped.',
+          ),
+        ),
+        isTrue,
+      );
+      expect(
+        GeneratedPluginsPackage.isResolveTimeout(
+          StateError('error: no such module'),
+        ),
+        isFalse,
+      );
     });
   });
 }
