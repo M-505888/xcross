@@ -1577,7 +1577,16 @@ abstract final class GeneratedPluginsPackage {
             '${missing.join(newline)}$newline',
           );
         }
-        if (source != original) await _writeStable(entity.path, source);
+        if (source != original) {
+          await _writeStable(entity.path, source);
+          // Staging re-copies the pristine plugin source before each build,
+          // so this repair is genuinely re-applied every run and lands with a
+          // fresh timestamp even though it always produces the same bytes.
+          // Deriving the timestamp from those bytes keeps SwiftPM from
+          // recompiling the consumer, and everything downstream of it, purely
+          // because the repair ran again.
+          await _stampByContent(entity.path, source);
+        }
       }
     }
   }
@@ -5799,9 +5808,13 @@ $diagnosticsStart$registrations$diagnosticsEnd}
   ///
   /// Failures are ignored. A timestamp that cannot be set costs a rebuild,
   /// which is the behaviour this avoids, not a broken build.
-  static Future<void> _stampByContent(String path, String content) async {
+  static Future<void> _stampByContent(String path, String content) =>
+      _stampByContentBytes(path, utf8.encode(content));
+
+  /// [_stampByContent] for content already encoded as bytes.
+  static Future<void> _stampByContentBytes(String path, List<int> bytes) async {
     try {
-      final digest = sha256.convert(utf8.encode(content)).bytes;
+      final digest = sha256.convert(bytes).bytes;
       // A fixed, arbitrary epoch plus a digest-derived offset. The offset is
       // bounded to roughly a decade so the result is always a valid, plainly
       // historical timestamp rather than something a tool might reject.
@@ -5895,6 +5908,13 @@ $diagnosticsStart$registrations$diagnosticsEnd}
       return false;
     }
     await existing.writeAsBytes(bytes);
+    // Staging re-copies plugin sources on every build, and a later repair
+    // pass rewrites some of them, so a file can be legitimately written
+    // twice per build while ending at the same bytes it had before. SwiftPM
+    // invalidates on timestamps, so without a content-derived stamp those
+    // rewrites recompile the target, and everything downstream of it, on
+    // every incremental build.
+    await _stampByContentBytes(destination, bytes);
     return true;
   }
 
