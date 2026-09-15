@@ -180,10 +180,93 @@ final class ComposeAppAssemblerWithSeams {
     );
     await _copyDirectory(framework, Directory(frameworkDest));
 
+    await _copyComposeResources(
+      project: project,
+      frameworkPath: framework.path,
+      stagingPath: stagingPath,
+    );
+
     if (!Platform.isWindows) {
       _makeExecutable(runnerDest);
       _makeExecutable(p.join(frameworkDest, project.baseName));
     }
+  }
+
+  /// Copies the app's Compose resources in as `compose-resources/`.
+  ///
+  /// Compose Multiplatform keeps resources *outside* the framework. On iOS the
+  /// bundle's `compose-resources/` directory plays the role that `assets/` plays
+  /// on Android, so it holds the whole resources root — `compose-resources/
+  /// composeResources/<package>/…` — which is what `DefaultIOsResourceReader`
+  /// resolves against the main bundle. A bundle assembled without it aborts on the
+  /// first composition that touches a resource: a font read from the theme is
+  /// enough to raise `MissingResourceException` inside `setContent`, which the
+  /// Kotlin runtime turns into `terminateWithUnhandledException` and an
+  /// `abort()`. Confirmed on an iPhone: the app launched, composed, and died two
+  /// seconds later with a symbolicated `MissingResourceException` for a font.
+  Future<void> _copyComposeResources({
+    required KmpProject project,
+    required String frameworkPath,
+    required String stagingPath,
+  }) async {
+    final source = _composeResourcesRoot(project, frameworkPath);
+    if (source == null) return;
+    await _copyDirectory(
+      source,
+      Directory(p.join(stagingPath, 'compose-resources')),
+    );
+  }
+
+  /// Gradle's aggregated output for the built target — the only one that also
+  /// carries resources contributed by dependencies (coil, koin, …). Returns the
+  /// resources *root*, whose contents belong in the bundle: it is the directory
+  /// holding `composeResources/`, not that directory itself.
+  Directory? _composeResourcesRoot(KmpProject project, String frameworkPath) {
+    final buildDir = p.join(project.modulePath, 'build');
+    final target = _targetFromFrameworkPath(frameworkPath);
+    final aggregated = p.join(
+      buildDir,
+      'kotlin-multiplatform-resources',
+      'aggregated-resources',
+    );
+    final candidates = <String>[
+      if (target != null) p.join(aggregated, target),
+      if (target != null) p.join(buildDir, 'processedResources', target, 'main'),
+      // The framework path does not always name a target (custom layouts, tests),
+      // so fall back to whatever Gradle produced, sorted to keep the choice stable.
+      ..._resourceCandidates(aggregated, ''),
+      ..._resourceCandidates(p.join(buildDir, 'processedResources'), 'main'),
+    ];
+    for (final candidate in candidates) {
+      // A directory is only a resources root if it actually holds
+      // `composeResources/`; otherwise a project without resources would get an
+      // empty directory in its bundle.
+      if (Directory(p.join(candidate, 'composeResources')).existsSync()) {
+        return Directory(candidate);
+      }
+    }
+    return null;
+  }
+
+  static Iterable<String> _resourceCandidates(String parent, String leaf) {
+    final directory = Directory(parent);
+    if (!directory.existsSync()) return const [];
+    final names =
+        directory
+            .listSync(followLinks: false)
+            .whereType<Directory>()
+            .map((entity) => p.basename(entity.path))
+            .toList()
+          ..sort();
+    return names.map((name) => p.join(parent, name, leaf));
+  }
+
+  /// `<module>/build/bin/iosArm64/debugFramework/Shared.framework` → `iosArm64`.
+  static String? _targetFromFrameworkPath(String frameworkPath) {
+    final segments = p.split(frameworkPath);
+    final binIndex = segments.indexOf('bin');
+    if (binIndex < 0 || binIndex + 1 >= segments.length) return null;
+    return segments[binIndex + 1];
   }
 
   void _validateStagedApp({
