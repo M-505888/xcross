@@ -485,7 +485,6 @@ abstract final class GeneratedPluginsPackage {
         [...baseArguments, '--print-manifest-job-graph'],
         environment: environment,
         label: 'swift build plan',
-        timeout: swiftResolveTimeout,
       ),
     );
     await repairWindowsGeneratedBuildFiles(
@@ -515,7 +514,6 @@ abstract final class GeneratedPluginsPackage {
           [...baseArguments, ...interopArguments, '--print-manifest-job-graph'],
           environment: environment,
           label: 'swift build plan (interop)',
-          timeout: swiftResolveTimeout,
         ),
       );
       await repairWindowsGeneratedBuildFiles(
@@ -537,7 +535,6 @@ abstract final class GeneratedPluginsPackage {
         environment: environment,
         inheritStdio: windows && Log.isVerbose,
         label: 'swift build',
-        timeout: swiftBuildTimeout,
       );
       await repairWindowsGeneratedBuildFiles(
         scratchPath,
@@ -652,21 +649,18 @@ abstract final class GeneratedPluginsPackage {
     }
   }
 
-  /// How long `swift package resolve` may run before it is killed.
-  ///
-  /// Resolution spawns git per dependency, and any one of those can block
-  /// forever on a credential prompt or a dead remote. Generous enough for a
-  /// cold graph the size of firebase-ios-sdk, short enough that CI reports a
-  /// real error instead of burning the job's whole time budget in silence.
-  @visibleForTesting
-  static const swiftResolveTimeout = Duration(minutes: 30);
-
   /// One `swift package resolve` attempt against [directory].
   ///
   /// SwiftPM resolves source-control dependencies by spawning git, so this
   /// needs the same non-interactive settings as our own clones: otherwise a
   /// moved or private dependency parks SwiftPM on an unanswerable credential
   /// prompt.
+  ///
+  /// Deliberately unbounded. A cold graph the size of firebase-ios-sdk is
+  /// legitimately slow, and a wall-clock cap turned a slow build into a
+  /// failed one. The non-interactive git settings in
+  /// [swiftProcessEnvironment] are what keep a credential prompt from
+  /// hanging forever, not a timeout.
   static Future<void> _resolveOnce(String swift, String directory) async {
     final result = await ProcessRunner.run(
       swift,
@@ -677,19 +671,7 @@ abstract final class GeneratedPluginsPackage {
         'resolve',
       ],
       environment: swiftProcessEnvironment(),
-      // SwiftPM spawns git per dependency, and a URL-scoped credential helper
-      // is beyond the reach of any environment reset, so bound the whole
-      // resolution too.
-      timeout: swiftResolveTimeout,
     );
-    if (result.timedOut) {
-      throw FlutterBuildError(
-        'Resolving SwiftPM dependencies in $directory took longer than '
-        '${swiftResolveTimeout.inMinutes} minutes and was stopped. This '
-        'usually means git is blocked on a credential prompt for a private '
-        'or moved dependency.\n${resolveDiagnostics(result)}',
-      );
-    }
     if (result.exitCode != 0) {
       throw FlutterBuildError(
         'Cannot resolve SwiftPM dependencies in $directory:\n'
@@ -710,10 +692,6 @@ abstract final class GeneratedPluginsPackage {
     result.stdout.trim(),
     result.stderr.trim(),
   ].where((stream) => stream.isNotEmpty).join('\n');
-
-  /// How long a single `swift build` invocation may run before it is killed.
-  @visibleForTesting
-  static const swiftBuildTimeout = Duration(minutes: 60);
 
   /// Resolves Windows dependencies with the external toolset, materializes
   /// the Git-for-Windows symlink placeholders the resolve leaves behind, and
@@ -747,11 +725,6 @@ abstract final class GeneratedPluginsPackage {
       environment: environment,
       inheritStdio: Log.isVerbose,
       label: 'swift package resolve',
-      // This is the call that hung Windows CI for hours with no output:
-      // SwiftPM shells out to git per dependency and one of those can block
-      // indefinitely. Bound it so the build fails loudly instead of silently
-      // occupying the runner until the job limit.
-      timeout: swiftResolveTimeout,
     );
     Future<void> resolveWithRetries() => retryingTransientNetworkFailure(
       resolve,
