@@ -83,6 +83,13 @@ final class GrandSlamEndpoints {
 
   /// Sends a GrandSlam request with redirects disabled - a 3xx on these
   /// endpoints would mean credentials leaving Apple's hosts.
+  ///
+  /// Do not reuse connections: after the akd client-info fix, Apple's GSA
+  /// can return HTTP 429 on the SRP proof when init and complete share one
+  /// connection. iLoader 2.3.3 fixed this by disabling reqwest's idle pool:
+  /// https://github.com/nab138/isideload/commit/f6a4d5dba717d72fc2af63eaba26b27ba44116be
+  /// IOClient forwards persistentConnection=false to dart:io, closing the
+  /// connection after this response without weakening TLS or replaying a POST.
   static Future<http.Response> sendGrandSlamRequest(
     http.Client client, {
     required String method,
@@ -91,10 +98,10 @@ final class GrandSlamEndpoints {
     Map<String, String>? headers,
     String? body,
   }) async {
-    final request = http.Request(
-      method,
-      validateGrandSlamUrl(url, field: operation),
-    )..followRedirects = false;
+    final request =
+        http.Request(method, validateGrandSlamUrl(url, field: operation))
+          ..followRedirects = false
+          ..persistentConnection = false;
     if (headers != null) request.headers.addAll(headers);
     if (body != null) request.body = body;
 

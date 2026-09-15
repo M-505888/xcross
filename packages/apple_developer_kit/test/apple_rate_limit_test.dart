@@ -13,6 +13,7 @@ void main() {
   for (final operation in ['init', 'complete', 'apptokens']) {
     test('$operation sends akd on the actual GSA request', () async {
       final client = MockClient((request) async {
+        expect(request.persistentConnection, isFalse);
         expect(request.headers['X-MMe-Client-Info'], anisetteClientInfo);
         expect(
           request.headers['X-MMe-Client-Info'],
