@@ -43,21 +43,17 @@ final class DeviceLog {
     if (!enabled) return null;
     try {
       final invocation = await Pymd.resolve();
-      final process = await ProcessRunner.start(
-        invocation.executable,
-        [
-          ...invocation.prefixArgs,
-          'developer',
-          'dvt',
-          'oslog',
-          ...deviceArgs,
-          '--pid',
-          '$pid',
-          '--format',
-          'json',
-        ],
-        environment: processEnvironment(Pymd.usbmuxEnvironment()),
-      );
+      final process = await ProcessRunner.start(invocation.executable, [
+        ...invocation.prefixArgs,
+        'developer',
+        'dvt',
+        'oslog',
+        ...deviceArgs,
+        '--pid',
+        '$pid',
+        '--format',
+        'json',
+      ], environment: processEnvironment(Pymd.usbmuxEnvironment()));
       final log = DeviceLog._(process, pid).._listen();
       unawaited(
         process.exitCode.then((code) {
