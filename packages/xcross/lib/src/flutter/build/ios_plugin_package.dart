@@ -1577,16 +1577,7 @@ abstract final class GeneratedPluginsPackage {
             '${missing.join(newline)}$newline',
           );
         }
-        if (source != original) {
-          await _writeStable(entity.path, source);
-          // Staging re-copies the pristine plugin source before each build,
-          // so this repair is genuinely re-applied every run and lands with a
-          // fresh timestamp even though it always produces the same bytes.
-          // Deriving the timestamp from those bytes keeps SwiftPM from
-          // recompiling the consumer, and everything downstream of it, purely
-          // because the repair ran again.
-          await _stampByContent(entity.path, source);
-        }
+        if (source != original) await _writeStable(entity.path, source);
       }
     }
   }
@@ -2806,6 +2797,13 @@ abstract final class GeneratedPluginsPackage {
       transform: transform,
     );
     await _writeStable(p.join(staged, 'Package.swift'), manifest);
+    // The manifest is regenerated from the plugin's own each build and can
+    // legitimately differ between the staging write and a later pass, so
+    // "write only when changed" cannot keep its timestamp fixed on its own.
+    // SwiftPM invalidates a package's whole target set on its manifest
+    // timestamp, so stamp by content: identical output keeps the timestamp
+    // SwiftPM already compiled against.
+    await _stampByContent(p.join(staged, 'Package.swift'), manifest);
   }
 
   /// The host-compatibility source rewrite as a sync transform, electing
@@ -5792,10 +5790,18 @@ $diagnosticsStart$registrations$diagnosticsEnd}
   ///
   /// SwiftPM invalidates on timestamps, so rewriting identical generated
   /// files would recompile the whole plugin graph on every run.
+  ///
+  /// Skipping the write is not enough on its own. Several of these files are
+  /// staged, reset, or regenerated from scratch earlier in the same build, so
+  /// the write is genuinely necessary yet still produces the bytes the last
+  /// build compiled. The timestamp is therefore derived from the content, so
+  /// identical output always presents SwiftPM with an identical timestamp.
   static Future<void> _writeStable(String path, String content) async {
     final file = File(path);
-    if (file.existsSync() && await file.readAsString() == content) return;
-    await _writeAtomic(path, utf8.encode(content));
+    if (!(file.existsSync() && await file.readAsString() == content)) {
+      await _writeAtomic(path, utf8.encode(content));
+    }
+    await _stampByContent(path, content);
   }
 
   /// Sets [path]'s modification time to a function of [content].
