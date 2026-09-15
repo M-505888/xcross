@@ -1018,7 +1018,24 @@ abstract final class GeneratedPluginsPackage {
             original,
             localPaths,
           );
-          await write(manifestFile.path, utf8.encode(rewritten));
+          if (rewritten != original) {
+            await write(manifestFile.path, utf8.encode(rewritten));
+          }
+          // SwiftPM invalidates on timestamps, and a manifest's timestamp
+          // invalidates every target in its package. Vendoring restores the
+          // upstream manifest with `git reset --hard` before each build, so
+          // this rewrite lands on a file git has just re-stamped: 12
+          // manifests per run, each with the same bytes as the run before,
+          // and that alone made the whole Firebase graph recompile on every
+          // incremental build.
+          //
+          // Neither the pre-write timestamp nor "skip when unchanged" can
+          // fix that, because the reset moves the timestamp and reverts the
+          // content before this code runs. Deriving the timestamp from the
+          // bytes does: identical patched manifests always carry an
+          // identical timestamp, and a genuinely new patch still gets a new
+          // one.
+          await _stampByContent(manifestFile.path, rewritten);
         }
       } on Object {
         for (final created in createdDestinations.entries.toList().reversed) {
@@ -5607,6 +5624,12 @@ let package = Package(
       if (updated == original) return;
       await _clearPlaceholderAttributes(manifest.path);
       await manifest.writeAsString(updated);
+      // Vendoring restores the upstream manifest with `git reset --hard`
+      // before each build, so these host fixes are re-applied every run and
+      // land with a fresh timestamp even though the bytes never change.
+      // SwiftPM invalidates a package's whole target set on its manifest
+      // timestamp, so that alone recompiled the entire graph each build.
+      await _stampByContent(manifest.path, updated);
       changed = true;
     }
 
@@ -5764,6 +5787,34 @@ $diagnosticsStart$registrations$diagnosticsEnd}
     final file = File(path);
     if (file.existsSync() && await file.readAsString() == content) return;
     await _writeAtomic(path, utf8.encode(content));
+  }
+
+  /// Sets [path]'s modification time to a function of [content].
+  ///
+  /// For a file that must be rewritten on every run because something else
+  /// reverts it first, "write only when changed" cannot keep the timestamp
+  /// stable. Deriving the timestamp from the bytes can: the same content
+  /// always yields the same timestamp, so SwiftPM sees no change, while new
+  /// content still moves it.
+  ///
+  /// Failures are ignored. A timestamp that cannot be set costs a rebuild,
+  /// which is the behaviour this avoids, not a broken build.
+  static Future<void> _stampByContent(String path, String content) async {
+    try {
+      final digest = sha256.convert(utf8.encode(content)).bytes;
+      // A fixed, arbitrary epoch plus a digest-derived offset. The offset is
+      // bounded to roughly a decade so the result is always a valid, plainly
+      // historical timestamp rather than something a tool might reject.
+      final offset =
+          ((digest[0] << 24) | (digest[1] << 16) | (digest[2] << 8) | digest[3])
+              .toUnsigned(32) %
+          const Duration(days: 3650).inSeconds;
+      await File(path).setLastModified(
+        DateTime.utc(2010).add(Duration(seconds: offset)),
+      );
+    } on Object {
+      // Deliberately ignored: see above.
+    }
   }
 
   static Future<void> _writeAtomic(String path, List<int> bytes) async {
