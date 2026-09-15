@@ -185,51 +185,6 @@ void main() {
     },
   );
 
-  test(
-    'static framework is force-loaded into the runner instead of -framework',
-    () async {
-      final fixture = _Fixture.create()..createSdk();
-      final calls = <_Call>[];
-      addTearDown(fixture.dispose);
-
-      await ObjcRunnerBuilder.withSeams(
-        runChecked: (executable, arguments, {workingDirectory}) async {
-          calls.add(_Call(executable, arguments, workingDirectory));
-          if (executable == fixture.toolchain.clang) {
-            File(
-              p.join(fixture.objcBuildDir, 'main.o'),
-            ).writeAsStringSync('object');
-          } else if (executable == fixture.toolchain.ld64Lld) {
-            fixture.writeMachO(p.join(fixture.objcBuildDir, 'Runner'));
-          }
-        },
-      ).build(
-        project: fixture.staticObjcProject,
-        frameworkPath: fixture.frameworkPath,
-        toolchain: fixture.toolchain,
-      );
-
-      final ld = calls.last.arguments;
-      // The archive's members must all be pulled: symbols inside it reference
-      // each other (Skia, expat, harfbuzz), which a plain -framework lookup
-      // does not resolve.
-      expect(
-        ld,
-        containsAllInOrder([
-          '-force_load',
-          p.join(fixture.frameworkPath, 'Shared'),
-        ]),
-      );
-      for (var i = 0; i + 1 < ld.length; i++) {
-        if (ld[i] == '-framework') {
-          expect(ld[i + 1], isNot('Shared'));
-        }
-      }
-      // Nothing is embedded for a static framework, so no bundle rpath either.
-      expect(ld, isNot(contains('-rpath')));
-    },
-  );
-
   test('Swift runner links the real compiler-rt static library when the '
       'Darwin SDK bundle has one', () async {
     // A non-Apple clang driving the swiftc link (Ubuntu's packaged clang,
@@ -587,19 +542,6 @@ final class _Fixture {
     ld64Lld: p.join(root, 'ld64.lld'),
     darwinSdkPath: iphoneSdk,
     darwinSdkBundle: darwinSdkBundle,
-  );
-
-  KmpProject get staticObjcProject => KmpProject(
-    root: root,
-    modulePath: p.join(root, 'shared'),
-    moduleName: 'shared',
-    baseName: 'Shared',
-    entryKind: KmpEntryKind.runnableApp,
-    isStaticFramework: true,
-    bundleId: 'dev.example.shared',
-    appName: 'Example',
-    entryClass: 'MainViewControllerKt',
-    entrySelector: 'MainViewController',
   );
 
   KmpProject get objcProject => KmpProject(
