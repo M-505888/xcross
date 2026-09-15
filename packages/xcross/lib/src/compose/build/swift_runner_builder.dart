@@ -67,8 +67,10 @@ final class SwiftRunnerBuilder {
       resourceDir,
       '-F',
       p.dirname(frameworkPath),
-      '-framework',
-      project.baseName,
+      // Static framework = archive; see ObjcRunnerBuilder for why -force_load.
+      if (project.isStaticFramework)
+        ...['-force_load', p.join(frameworkPath, project.baseName)]
+      else ...['-framework', project.baseName],
       '-parse-as-library',
       '-module-cache-path',
       moduleCache,

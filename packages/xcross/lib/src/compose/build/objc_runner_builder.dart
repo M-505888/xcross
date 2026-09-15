@@ -99,16 +99,22 @@ final class ObjcRunnerBuilder {
       p.join(iphoneSdk, 'System', 'Library', 'Frameworks'),
       '-F',
       p.join(iphoneSdk, 'System', 'Library', 'SubFrameworks'),
-      '-framework',
-      project.baseName,
+      // A static framework's binary is an *archive*: `-framework` locates it but
+      // the linker only pulls members that resolve a symbol reference at the
+      // point it is considered, so symbols used from inside the archive itself
+      // (Skia, expat, harfbuzz, …) stay undefined. `-force_load` pulls every
+      // member, which is what the app's own link does. There is nothing to
+      // embed for a static framework either, so no rpath is needed.
+      if (project.isStaticFramework)
+        ...['-force_load', p.join(frameworkPath, project.baseName)]
+      else ...['-framework', project.baseName],
       '-framework',
       'UIKit',
       '-framework',
       'Foundation',
       '-lobjc',
       '-lc',
-      '-rpath',
-      '@executable_path/Frameworks',
+      if (!project.isStaticFramework) ...['-rpath', '@executable_path/Frameworks'],
     ]);
     await _runChecked(
       ld.executable,

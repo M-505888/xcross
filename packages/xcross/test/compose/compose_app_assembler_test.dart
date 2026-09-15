@@ -75,6 +75,23 @@ void main() {
     },
   );
 
+  test('static framework is linked in, not embedded in the bundle', () async {
+    final fixture = _Fixture.create()..createInputs();
+    addTearDown(fixture.dispose);
+
+    final appPath = await ComposeAppAssembler.withSeams().assemble(
+      project: fixture.staticProject,
+      runnerPath: fixture.runnerPath,
+      frameworkPath: fixture.frameworkPath,
+    );
+
+    expect(File(p.join(appPath, 'Runner')).existsSync(), isTrue);
+    expect(File(p.join(appPath, 'Info.plist')).existsSync(), isTrue);
+    // A static framework's code is inside Runner; copying the archive in would
+    // ship hundreds of megabytes of dead weight and break the signing layout.
+    expect(Directory(p.join(appPath, 'Frameworks')).existsSync(), isFalse);
+  });
+
   test('rejects missing runner and framework inputs', () async {
     final fixture = _Fixture.create()..createInputs();
     addTearDown(fixture.dispose);
@@ -272,6 +289,17 @@ final class _Fixture {
   final String frameworkPath;
 
   String get outputDir => p.join(root, 'build', 'xcross-ios');
+
+  KmpProject get staticProject => KmpProject(
+    root: root,
+    modulePath: p.join(root, 'shared'),
+    moduleName: 'shared',
+    baseName: 'Shared',
+    entryKind: KmpEntryKind.swiftApp,
+    isStaticFramework: true,
+    bundleId: 'dev.example.shared',
+    appName: 'Example',
+  );
 
   KmpProject get project => KmpProject(
     root: root,

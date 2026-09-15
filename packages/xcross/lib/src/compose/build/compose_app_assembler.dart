@@ -166,23 +166,32 @@ final class ComposeAppAssemblerWithSeams {
     required Directory framework,
     required String stagingPath,
   }) async {
-    await Directory(p.join(stagingPath, 'Frameworks')).create(recursive: true);
-
+    await Directory(stagingPath).create(recursive: true);
     final runnerDest = p.join(stagingPath, 'Runner');
     await runner.copy(runnerDest);
     await File(
       p.join(stagingPath, 'Info.plist'),
     ).writeAsString(ComposeInfoPlist.build(project: project));
-    final frameworkDest = p.join(
-      stagingPath,
-      'Frameworks',
-      '${project.baseName}.framework',
-    );
-    await _copyDirectory(framework, Directory(frameworkDest));
+
+    // A static framework is linked into Runner, so there is nothing to embed;
+    // copying it would ship a ~400 MB archive inside the .app for no reason.
+    if (!project.isStaticFramework) {
+      await Directory(
+        p.join(stagingPath, 'Frameworks'),
+      ).create(recursive: true);
+      final frameworkDest = p.join(
+        stagingPath,
+        'Frameworks',
+        '${project.baseName}.framework',
+      );
+      await _copyDirectory(framework, Directory(frameworkDest));
+      if (!Platform.isWindows) {
+        _makeExecutable(p.join(frameworkDest, project.baseName));
+      }
+    }
 
     if (!Platform.isWindows) {
       _makeExecutable(runnerDest);
-      _makeExecutable(p.join(frameworkDest, project.baseName));
     }
   }
 
@@ -193,12 +202,13 @@ final class ComposeAppAssemblerWithSeams {
     final requiredFiles = [
       p.join(appPath, 'Runner'),
       p.join(appPath, 'Info.plist'),
-      p.join(
-        appPath,
-        'Frameworks',
-        '${project.baseName}.framework',
-        project.baseName,
-      ),
+      if (!project.isStaticFramework)
+        p.join(
+          appPath,
+          'Frameworks',
+          '${project.baseName}.framework',
+          project.baseName,
+        ),
     ];
     for (final path in requiredFiles) {
       if (!File(path).existsSync()) {
