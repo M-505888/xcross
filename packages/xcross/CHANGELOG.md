@@ -1,3 +1,9 @@
+## 1.4.4
+
+- Report the reason behind an app's `SIGABRT` on device: stream the device log over plain usbmux, always retain a bounded history, and print the abort reason (or the last device lines) with the crash.
+- Bump `archive` from 4.2.0 to 4.3.0.
+- Document the configuration section and warn against using a primary Apple ID for xcross auth.
+
 ## 1.4.3
 
 - Speed up incremental Flutter iOS builds substantially: only prebuild the Swift interop targets the aggregate can actually reach, skip the interop re-plan when the build manifest already carries the search paths, and derive generated-file timestamps from their content so staged sources and vendored manifests stop invalidating SwiftPM on every run.
