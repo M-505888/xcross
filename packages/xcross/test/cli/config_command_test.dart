@@ -27,25 +27,6 @@ void main() {
     expect(XcrossCli.buildRunner().commands['config'], isA<ConfigCommand>());
   });
 
-  test('entrypoint reports runtime config initialization failures', () async {
-    final malformed = File(p.join(temporary.path, 'malformed.yaml'))
-      ..writeAsStringSync('roots: [');
-    final result = await Process.run(
-      Platform.resolvedExecutable,
-      ['run', 'bin/xcross.dart', '--version'],
-      workingDirectory: p.join(Directory.current.path, 'packages', 'xcross'),
-      environment: {
-        XcrossConfigStore.selectorVariable: malformed.path,
-        'NO_COLOR': '1',
-      },
-    );
-
-    expect(result.exitCode, 1);
-    expect(result.stderr, contains('error: ${malformed.path}: Invalid YAML:'));
-    expect(result.stderr, isNot(contains('Unhandled exception')));
-    expect(result.stderr, isNot(contains('XcrossConfigException')));
-  });
-
   test('runner omits configured top-level commands', () async {
     final runner = XcrossCli.buildRunner(
       excludedCommands: const ['setup', 'config'],

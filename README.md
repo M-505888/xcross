@@ -178,8 +178,8 @@ xcross auth --apple-id you@example.com
 
 The command prompts for your password and 2FA code, then stores **only** the resulting Developer Services session - never your password.
 
-> [!IMPORTANT]
-> Use a separate Apple account, not your main one. xcross signs in through a non-standard path for non-macOS systems, and Apple may treat that as unusual activity. Nothing has gone wrong in months of use before the public release, but the risk is not zero - and if an account does get flagged, you do not want it to be the one holding your purchases, iCloud data, and devices. Creating a throwaway Apple ID for xcross takes a minute and works fine, since a free account is all you need.
+> [!WARNING]
+> Do not use your primary Apple ID. xcross signs in through a non-standard path for non-macOS systems, and Apple may treat that as unusual activity: an account used with xcross can end up locked, and an appeal may not reinstate it. Creating a throwaway Apple ID takes a minute and a free account is all you need, which keeps that a minor inconvenience rather than losing your purchases, iCloud data, and devices.
 
 Machine attestation uses Android ADI libraries (`libCoreADI.so`, `libstoreservicescore.so`):
 
@@ -281,9 +281,11 @@ Without an explicit transport flag, `xcross flutter run` prefers a locally attac
 
 See the full [Wi-Fi setup and troubleshooting guide](https://xcross.sh/docs/wireless).
 
-## Command reference
+## Configuration
 
-xcross optionally reads YAML configuration from `XCROSS_CONFIG`, or from `config.yaml`/`config.yml` under the platform xcross config directory. It overlays explicit tool and root choices onto normal discovery: a configured executable takes precedence and must be a valid executable path, while unspecified tools (including `git`, device utilities, and system commands) continue to resolve through the wrapper or invoking user's `PATH`. `environment.PATH` prepends its entries to that inherited `PATH` for child processes.
+By default xcross takes the world as it finds it: whatever is on `PATH`. One optional YAML file changes that. Declare where Swift, LLVM, Flutter, and the SDK actually live, and every command - plus every process it spawns, including IDE launches - is rebuilt around that declaration before anything compiles.
+
+It is read from `XCROSS_CONFIG`, else `config.yaml`/`config.yml` under the platform xcross config directory. Configured executables win and must be real executable paths; everything unspecified (`git`, device utilities, system commands) still resolves through the invoking `PATH`. `environment.PATH` prepends its entries to that inherited `PATH` for child processes. No file means nothing changes.
 
 ```yaml
 toolchains:
@@ -302,6 +304,12 @@ environment:
   PATH:
     - /absolute/toolchain/bin
 ```
+
+Edit it with `xcross config`, inspect it with `xcross config show`, prove it with `xcross config validate`.
+
+**Full reference: [xcross.sh/docs/configuration](https://xcross.sh/docs/configuration)** - every key, discovery order, variable expansion, and the runtime overlay.
+
+## Command reference
 
 | Command | Description |
 |---|---|

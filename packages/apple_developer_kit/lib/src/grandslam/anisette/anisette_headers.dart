@@ -7,7 +7,9 @@ import 'package:meta/meta.dart';
 
 /// Client identity string Apple's servers expect. Cross-validated against
 /// Dadoum/Provision and xtool's `XADIProvider`: intentionally a stable
-/// fixed value, never real host hardware. Do not "normalize" it.
+/// fixed value, never real host hardware. GrandSlam's edge rejects client-info
+/// containing com.apple.dt.Xcode. Use the AuthKit daemon identity instead:
+/// https://github.com/Dadoum/anisette-v3-server/issues/59.
 @internal
 const String anisetteClientInfo =
     '<MacBookPro13,2> <macOS;13.1;22C65> '

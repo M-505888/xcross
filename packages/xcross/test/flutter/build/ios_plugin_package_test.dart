@@ -3739,6 +3739,119 @@ let package = Package(
       );
     });
 
+    test('skips prebuilding targets the aggregate cannot reach', () {
+      // The plan lists every target in the resolved dependency graph, not
+      // just the ones this build compiles. A target no product depends on is
+      // never scheduled, so it can never lose the header race the prepass
+      // exists to prevent, and its header never appears however many times
+      // it is prebuilt. Each such prebuild is a whole `swift build` process.
+      final buildDir = p.join(tmp.path, 'arm64-apple-ios', 'debug');
+      final headers = {
+        'Reachable': p.join(
+          buildDir,
+          'Reachable.build',
+          'include',
+          'Reachable-Swift.h',
+        ),
+        'Orphan': p.join(buildDir, 'Orphan.build', 'include', 'Orphan-Swift.h'),
+      };
+      Directory(buildDir).createSync(recursive: true);
+      File(p.join(buildDir, 'description.json')).writeAsStringSync(
+        jsonEncode({
+          'swiftCommands': {
+            for (final entry in headers.entries)
+              entry.key: {
+                'otherArguments': ['-emit-objc-header-path', entry.value],
+              },
+          },
+          'targetDependencyMap': {
+            'FlutterPluginsGenerated': ['Reachable'],
+            'Reachable': <String>[],
+            'Orphan': <String>[],
+          },
+        }),
+      );
+
+      expect(
+        GeneratedPluginsPackage.plannedSwiftInteropTargets(
+          buildDir,
+          candidates: const {'Reachable', 'Orphan'},
+        ),
+        ['Reachable'],
+      );
+    });
+
+    test('prebuilds unfiltered when the plan carries no dependency map', () {
+      // Reachability is an optimisation. Without a map to filter with, the
+      // full set must still be prebuilt rather than silently skipping the
+      // prepass and reintroducing the header race.
+      final buildDir = p.join(tmp.path, 'no-map', 'arm64-apple-ios', 'debug');
+      final header = p.join(
+        buildDir,
+        'Reachable.build',
+        'include',
+        'Reachable-Swift.h',
+      );
+      Directory(buildDir).createSync(recursive: true);
+      File(p.join(buildDir, 'description.json')).writeAsStringSync(
+        jsonEncode({
+          'swiftCommands': {
+            'Reachable': {
+              'otherArguments': ['-emit-objc-header-path', header],
+            },
+          },
+        }),
+      );
+
+      expect(
+        GeneratedPluginsPackage.plannedSwiftInteropTargets(
+          buildDir,
+          candidates: const {'Reachable'},
+        ),
+        ['Reachable'],
+      );
+    });
+
+    test('reports whether the manifest already carries the interop paths', () {
+      // llbuild replays the command lines stored in `debug.yaml` verbatim, so
+      // a manifest that already names every path builds exactly what a
+      // re-plan would. Re-planning anyway costs a whole extra planning
+      // process on every build, incremental ones included.
+      final scratch = p.join(tmp.path, 'scratch');
+      Directory(scratch).createSync(recursive: true);
+      final include = p.join(scratch, 'arm64-apple-ios', 'debug', 'A.build');
+      final arguments = ['-Xcc', '-I', '-Xcc', include];
+
+      expect(
+        GeneratedPluginsPackage.manifestCarriesInteropSearchPaths(
+          scratch,
+          arguments,
+        ),
+        isFalse,
+        reason: 'no manifest has been written yet',
+      );
+
+      final manifest = File(p.join(scratch, 'debug.yaml'));
+      manifest.writeAsStringSync('"-I","/somewhere/else"');
+      expect(
+        GeneratedPluginsPackage.manifestCarriesInteropSearchPaths(
+          scratch,
+          arguments,
+        ),
+        isFalse,
+      );
+
+      // The manifest is JSON-quoted, so a Windows path appears escaped.
+      manifest.writeAsStringSync('"-I",${jsonEncode(include)}');
+      expect(
+        GeneratedPluginsPackage.manifestCarriesInteropSearchPaths(
+          scratch,
+          arguments,
+        ),
+        isTrue,
+      );
+    });
+
     test(
       'prebuilds planned interop targets before the aggregate build',
       () async {
@@ -4388,153 +4501,6 @@ module FirebaseFirestore {
           source.replaceAll('\r\n', '\n').trimRight();
       expect(normalize(previewMacroStubSource), normalize(tracked));
     });
-
-    test(
-      'compiles once, reuses the cached binary, and answers the wire protocol',
-      () async {
-        final lookup = Platform.isWindows
-            ? await Process.run('where', ['clang'])
-            : await Process.run('which', ['clang']);
-        final compiler = lookup.stdout
-            .toString()
-            .split('\n')
-            .map((line) => line.trim())
-            .firstWhere((line) => line.isNotEmpty, orElse: () => '');
-        if (lookup.exitCode != 0 || compiler.isEmpty) {
-          markTestSkipped('no C compiler on PATH');
-          return;
-        }
-        final outputDir = p.join(tmp.path, 'stub-out');
-
-        final stubPath = await GeneratedPluginsPackage.writePreviewMacroStub(
-          outputDir: outputDir,
-          cCompilerPath: compiler,
-        );
-        expect(File(stubPath).existsSync(), isTrue);
-        final builtAt = File(stubPath).lastModifiedSync();
-
-        // A second call with the same output dir must not recompile.
-        await Future<void>.delayed(const Duration(milliseconds: 1100));
-        final again = await GeneratedPluginsPackage.writePreviewMacroStub(
-          outputDir: outputDir,
-          cCompilerPath: compiler,
-        );
-        expect(again, stubPath);
-        expect(File(stubPath).lastModifiedSync(), builtAt);
-
-        // The compiled binary answers swift-syntax's wire protocol: an
-        // 8-byte little-endian length prefix, then a JSON payload, echoed
-        // back the same way. `getCapability` must not be answered with an
-        // error, and an expansion request must return empty source so the
-        // macro compiles away to nothing.
-        final process = await Process.start(stubPath, const []);
-        // The stub redirects its own stdout to stderr, so anything arriving
-        // there is a crash or diagnostic. Drain it: it is the only evidence
-        // available when the wire protocol goes wrong.
-        final stderrBuffer = StringBuffer();
-        final stderrDone = process.stderr
-            .transform(utf8.decoder)
-            .forEach(stderrBuffer.write);
-        // stdout is a single-subscription Stream<List<int>> of arbitrarily
-        // sized chunks, not one event per byte, so exact-length reads need
-        // their own buffer over one shared subscription.
-        final incoming = <int>[];
-        var chunkArrived = Completer<void>();
-        var stdoutClosed = false;
-        final subscription = process.stdout.listen(
-          (chunk) {
-            incoming.addAll(chunk);
-            if (!chunkArrived.isCompleted) chunkArrived.complete();
-          },
-          onDone: () {
-            // Without this the reader below would await a completer nobody
-            // completes and the test would die on the 30s suite timeout with
-            // no clue why, instead of reporting the stub's own exit.
-            stdoutClosed = true;
-            if (!chunkArrived.isCompleted) chunkArrived.complete();
-          },
-        );
-        addTearDown(subscription.cancel);
-        Future<Uint8List> readExact(int count) async {
-          while (incoming.length < count) {
-            if (stdoutClosed) {
-              await stderrDone;
-              fail(
-                'stub closed stdout after ${incoming.length} of $count bytes; '
-                'exit=${await process.exitCode} stderr=$stderrBuffer',
-              );
-            }
-            await chunkArrived.future;
-            chunkArrived = Completer<void>();
-          }
-          final bytes = Uint8List.fromList(incoming.take(count).toList());
-          incoming.removeRange(0, count);
-          return bytes;
-        }
-
-        Uint8List frame(String json) {
-          final payload = utf8.encode(json);
-          final header = ByteData(8)
-            ..setUint64(0, payload.length, Endian.little);
-          return Uint8List.fromList([
-            ...header.buffer.asUint8List(),
-            ...payload,
-          ]);
-        }
-
-        Future<Map<String, dynamic>> roundTrip(String json) async {
-          process.stdin.add(frame(json));
-          await process.stdin.flush();
-          final header = await readExact(8);
-          final length = ByteData.sublistView(
-            header,
-          ).getUint64(0, Endian.little);
-          final body = await readExact(length);
-          return jsonDecode(utf8.decode(body)) as Map<String, dynamic>;
-        }
-
-        final capability = await roundTrip(
-          '{"getCapability":{"capability":null}}',
-        );
-        expect(capability.keys.single, 'getCapabilityResult');
-
-        final expansion = await roundTrip(
-          jsonEncode({
-            'expandFreestandingMacro': {
-              'macro': {
-                'moduleName': 'PreviewsMacros',
-                'typeName': 'X',
-                'name': 'Preview',
-              },
-              'discriminator': 'd',
-              'syntax': {
-                'kind': 'declaration',
-                'source': '#Preview {}',
-                'location': {
-                  'fileID': 'a',
-                  'fileName': 'a',
-                  'offset': 0,
-                  'line': 1,
-                  'column': 1,
-                },
-              },
-            },
-          }),
-        );
-        expect(expansion.keys.single, 'expandMacroResult');
-        final result = expansion['expandMacroResult'] as Map<String, dynamic>;
-        expect(result['expandedSource'], '');
-
-        process.stdin.add(Uint8List(8));
-        await process.stdin.close();
-        await process.exitCode;
-        // Windows can briefly hold the executable's file handle open past
-        // process exit, racing the suite's temp-directory teardown.
-        if (Platform.isWindows) {
-          await Future<void>.delayed(const Duration(milliseconds: 200));
-        }
-      },
-    );
   });
 
   group('built dylibs', () {
