@@ -68,29 +68,19 @@ void main() {
 
       expect(result.moduleKlibPath, fixture.moduleKlibPath);
       expect(result.dependencies, [normalizedExternal, siblingKlib.path]);
-      expect(calls, hasLength(2));
-      expect(calls.first.executable, p.join(fixture.root, 'gradlew'));
-      expect(calls.first.arguments, [
-        ':a:b:compileKotlinIosArm64',
-        '-Pkotlin.native.enableKlibsCrossCompilation=true',
-        '--no-daemon',
-        '--no-configuration-cache',
-        '--console=plain',
-      ]);
-      expect(calls[1].arguments, [
+      expect(calls, hasLength(1));
+      expect(calls.single.executable, p.join(fixture.root, 'gradlew'));
+      expect(calls.single.arguments, [
         ':a:b:dumpIosDeps',
+        '-Pkotlin.native.enableKlibsCrossCompilation=true',
         '--init-script',
-        calls[1].initScriptPath,
-        '--no-daemon',
+        calls.single.initScriptPath,
         '--no-configuration-cache',
         '--console=plain',
       ]);
-      expect(
-        calls.every((call) => call.workingDirectory == fixture.root),
-        isTrue,
-      );
-      expect(File(calls[1].initScriptPath).existsSync(), isFalse);
-      expect(File(calls[1].depsOutPath).existsSync(), isFalse);
+      expect(calls.single.workingDirectory, fixture.root);
+      expect(File(calls.single.initScriptPath).existsSync(), isFalse);
+      expect(File(calls.single.depsOutPath).existsSync(), isFalse);
     },
   );
 

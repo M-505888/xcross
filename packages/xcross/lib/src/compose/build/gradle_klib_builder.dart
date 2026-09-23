@@ -58,29 +58,22 @@ final class GradleKlibBuilder {
     }
 
     try {
-      await _run(
-        gradle.executable,
-        [
-          ...gradle.arguments,
-          ':${project.moduleName}:compileKotlinIosArm64',
-          '-Pkotlin.native.enableKlibsCrossCompilation=true',
-          '--no-daemon',
-          '--no-configuration-cache',
-          '--console=plain',
-        ],
-        workingDirectory: project.root,
-        environment: env,
-      );
-
+      // One invocation: dumpIosDeps depends on compileKotlinIosArm64, so
+      // Gradle compiles the klib and dumps its dependencies in the same
+      // build. Two separate `--no-daemon` builds each paid Gradle's startup
+      // and configuration again (over a minute per build on a large project,
+      // and on every `compose run --watch` rebuild). The daemon stays allowed
+      // for the same reason; Gradle hands it this client's environment
+      // (XCROSS_DEPS_OUT, KONAN_DATA_DIR) on every build.
       await File(initScriptPath).writeAsString(_dumpIosDepsInitScript(project));
       await _run(
         gradle.executable,
         [
           ...gradle.arguments,
           ':${project.moduleName}:dumpIosDeps',
+          '-Pkotlin.native.enableKlibsCrossCompilation=true',
           '--init-script',
           initScriptPath,
-          '--no-daemon',
           '--no-configuration-cache',
           '--console=plain',
         ],
