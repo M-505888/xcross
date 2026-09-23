@@ -51,6 +51,11 @@ void main() {
                 final source = initScript.readAsStringSync();
                 expect(source, contains('if (name != "b") return@allprojects'));
                 expect(source, contains('tasks.register("dumpIosDeps")'));
+                // Compose resources are refreshed in the same build, but only
+                // where the project has the tasks.
+                expect(source, contains('"iosArm64ProcessResources"'));
+                expect(source, contains('"iosArm64AggregateResources"'));
+                expect(source, contains('project.tasks.findByName(it)'));
                 expect(source, contains('System.getenv("XCROSS_DEPS_OUT")'));
                 File(environment!['XCROSS_DEPS_OUT']!).writeAsStringSync(
                   [

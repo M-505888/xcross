@@ -165,6 +165,16 @@ allprojects {
     if (name != "${project.moduleLeaf}") return@allprojects
     tasks.register("dumpIosDeps") {
         dependsOn("compileKotlinIosArm64")
+        // The app bundle's compose-resources/ is copied from these tasks'
+        // outputs. Nothing else runs them, so without this the bundle ships
+        // whatever an earlier IDE or Xcode build left there, while the code
+        // compiled just now reads string resources at offsets from the
+        // current files: a changed strings file aborted the app at launch
+        // (Base64 decode failure in getStringItem). Projects without Compose
+        // resources do not have the tasks.
+        listOf("iosArm64ProcessResources", "iosArm64AggregateResources")
+            .mapNotNull { project.tasks.findByName(it) }
+            .forEach { dependsOn(it) }
         doLast {
             val outPath = System.getenv("XCROSS_DEPS_OUT") ?: error("XCROSS_DEPS_OUT not set")
             val kotlinExt = project.extensions.findByName("kotlin") ?: error("no kotlin extension")
