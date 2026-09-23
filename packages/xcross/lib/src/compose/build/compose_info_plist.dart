@@ -82,7 +82,7 @@ abstract final class ComposeInfoPlist {
   ///
   /// Copying the file verbatim left an app that reads configuration from its
   /// Info.plist (an API base URL, an OAuth client id) with the literal text
-  /// `$(REPASAR_API_BASE_URL)`, which such an app rightly refuses at launch.
+  /// `$(API_BASE_URL)`, which such an app rightly refuses at launch.
   static Map<String, Object?> _expandMap(
     Map<String, Object?> map,
     Map<String, String> settings,

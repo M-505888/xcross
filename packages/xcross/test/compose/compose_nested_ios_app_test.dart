@@ -27,14 +27,14 @@ void main() {
 // The bundle id lives in the Xcode project, not here.
 PRODUCT_NAME=Nested
 MARKETING_VERSION=3.1
-REPASAR_API_BASE_URL=https:/$()/api.example.com
+API_BASE_URL=https:/$()/api.example.com
 CLIENT_ID=12345
 ''');
     write('app/iosApp/iosApp/Info.plist', r'''
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-<key>ApiBaseUrl</key><string>$(REPASAR_API_BASE_URL)</string>
+<key>ApiBaseUrl</key><string>$(API_BASE_URL)</string>
 <key>ClientId</key><string>${CLIENT_ID}</string>
 <key>Unknown</key><string>before-$(NOT_DEFINED)-after</string>
 <key>Schemes</key><array><string>app-$(PRODUCT_BUNDLE_IDENTIFIER)</string></array>
@@ -87,7 +87,7 @@ CLIENT_ID=12345
     test('keeps every xcconfig setting, expanded', () {
       nestedApp();
       final settings = IosAppConfig.load(root)!.buildSettings;
-      expect(settings['REPASAR_API_BASE_URL'], 'https://api.example.com');
+      expect(settings['API_BASE_URL'], 'https://api.example.com');
       expect(settings['CLIENT_ID'], '12345');
     });
   });
